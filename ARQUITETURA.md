@@ -827,8 +827,8 @@ ficaria tão bom quanto desenvolver, o oposto do que o usuário pediu:
 eficiente do que desenvolvê-las"). Todas as 6 áreas (Militar/Saúde/
 Cultura/Administração/Comércio/Arcano) convertem esse Poder pra sua
 unidade - o "Bônus da Coleção" continua SEM esse termo (só CP total×1%,
-não é uma área, é a coleção inteira, exemplo do usuário não tinha
-quantidade nele).
+mecanismo à parte cobrindo a coleção INTEIRA, não uma área - exemplo do
+usuário não tinha quantidade nele).
 
 **Bônus de CP por CLASSE (novo, taxonomia ABERTA - não confundir com as
 6 "Funções da Cidade", que são a taxonomia FECHADA)** - pedido do
