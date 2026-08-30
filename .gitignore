@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Segredos (nunca commitar)
+.env
+.env.*
+!.env.example
+
+# Banco de dados real em runtime
+data/*.db
+
+# Editores / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
