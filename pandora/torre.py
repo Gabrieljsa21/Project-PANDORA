@@ -131,7 +131,7 @@ def categoria_personagem(personagem):
     return db.categoria_combate_da_classe(personagem["classe"]) if personagem.get("classe") else None
 
 
-def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=None, cache_bonus_classe=None):
+def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=None, cache_bonus_classe=None, bonus_series=None):
     """CP de UMA personagem, no vínculo (guild+user) - núcleo reaproveitado
     pela Party inteira (`_calcular_contexto`) e por qualquer UI que precise
     mostrar o CP avulso de uma personagem (Party/dropdowns, 2026-08-30,
@@ -163,7 +163,6 @@ def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=Non
     funcionando igual, sem passar nada disso - cai no fallback de sempre."""
     if nivel is None:
         nivel = db.nivel_personagem(guild_id, user_id, personagem["id"])
-    categoria = categoria_personagem(personagem)
     power = power_final(
         personagem["popularidade"], nivel, personagem.get("afinidade", 1), bool(personagem.get("is_soulmate")),
     )
@@ -171,21 +170,60 @@ def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=Non
         bonus_global = db.bonus_cp_global(guild_id, user_id)
     bonus_fixo, bonus_percentual = bonus_global
     classe = personagem.get("classe")
+    # 🔥 `categoria_combate_da_classe` também entra no cache (2026-09-01,
+    # achado do usuário: "Quando fui upar level apenas de 1 personagem
+    # para o maximo, gaia nao respondeu a tempo") - só `bonus_cp_classe`
+    # era cacheado antes; `categoria_personagem` (que faz sua PRÓPRIA
+    # consulta) continuava rodando pra TODA personagem da coleção, mesmo
+    # repetindo a MESMA classe centenas de vezes (ex.: 44 "Guerreiro" =
+    # 44 conexões SQLite idênticas) - `db.conexao()` não faz pool, então
+    # isso sozinho dominava o tempo de `cidade._workforce_por_funcao`
+    # (2,7s pra ~1.100 personagens, quase tudo nessa 2ª consulta por
+    # classe). Cache guarda os 2 valores juntos por classe agora.
     if cache_bonus_classe is not None:
+        # 🔥 3º elemento (`funcao_cidade`) é ignorado aqui de propósito -
+        # não é usado por `power_personagem`, só existe nesta tupla pra
+        # `cidade._workforce_por_funcao` reaproveitar o MESMO cache (ver
+        # `db.info_classes_em_lote`) sem precisar de outra consulta.
         if classe not in cache_bonus_classe:
-            cache_bonus_classe[classe] = db.bonus_cp_classe(guild_id, user_id, classe)
-        bonus_classe = cache_bonus_classe[classe]
+            cache_bonus_classe[classe] = (
+                db.bonus_cp_classe(guild_id, user_id, classe),
+                categoria_personagem(personagem),
+                db.funcao_cidade_da_classe(classe),
+            )
+        bonus_classe, categoria, _funcao_cidade = cache_bonus_classe[classe]
     else:
         bonus_classe = db.bonus_cp_classe(guild_id, user_id, classe)
-    power = (power + bonus_fixo + bonus_classe) * (1 + bonus_percentual)
+        categoria = categoria_personagem(personagem)
+    # 🔥 Bônus de Série Favorita (2026-09-02, pedido do usuário) - só afeta
+    # personagens DAQUELA série (nunca CP global, "isso inevitavelmente vira
+    # outra fonte enorme de power creep") - lido do snapshot pré-calculado
+    # (`db.bonus_series_favoritas`, via `_contexto_lote`), nunca recalculado
+    # aqui (calcular completude de série é caro, ver `pandora.series_
+    # favoritas`). Chamada avulsa (sem `bonus_series`) simplesmente não
+    # aplica bônus nenhum, mesmo padrão de `bonus_global`/`cache_bonus_
+    # classe` opcionais.
+    bonus_serie = bonus_series.get(personagem.get("serie"), 0.0) if bonus_series else 0.0
+    power = (power + bonus_fixo + bonus_classe) * (1 + bonus_percentual) * (1 + bonus_serie)
     return power, nivel, categoria
 
 
 def _contexto_lote(guild_id, user_id):
-    """Nível/bônus global pré-carregados 1x + cache vazio de bônus por
-    classe - pra passar em `power_personagem` ao varrer uma coleção
-    inteira sem N+1 (ver docstring de `power_personagem`)."""
-    return db.nivel_em_lote(guild_id, user_id), db.bonus_cp_global(guild_id, user_id), {}
+    """Nível/bônus global pré-carregados 1x + cache de bônus/categoria por
+    classe JÁ PREENCHIDO (2026-09-01, achado do usuário: "upar level de 1
+    personagem pro maximo... gaia nao respondeu a tempo") - `db.info_
+    classes_em_lote` resolve TODA classe da coleção numa query só, em vez
+    de deixar `power_personagem` abrir 1 conexão nova por classe DISTINTA
+    encontrada durante o loop (ainda seria N+1, só que por classe em vez
+    de por personagem - pra muitas classes diferentes, isso sozinho já
+    dominava o tempo de `cidade._workforce_por_funcao`). 🔥 4º item,
+    `bonus_series` (2026-09-02) - snapshot de bônus por Série Favorita
+    (`db.bonus_series_favoritas`), mesma lógica: 1 leitura barata aqui em
+    vez de `power_personagem` consultar por personagem."""
+    return (
+        db.nivel_em_lote(guild_id, user_id), db.bonus_cp_global(guild_id, user_id),
+        dict(db.info_classes_em_lote(guild_id, user_id)), db.bonus_series_favoritas(guild_id, user_id),
+    )
 
 
 def ordenar_por_power(personagens, guild_id, user_id):
@@ -195,11 +233,14 @@ def ordenar_por_power(personagens, guild_id, user_id):
     `power_personagem`, que depende de Nível/Afinidade do vínculo); pra
     lista de personagens NÃO possuídas (loja/wishlist), usar `consulta.
     ordenar_por_popularidade` em vez desta."""
-    niveis, bonus_global, cache_classe = _contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series = _contexto_lote(guild_id, user_id)
 
     def _power(p):
         nivel = niveis.get(p["id"], 1)
-        return power_personagem(p, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe)[0]
+        return power_personagem(
+            p, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
+            bonus_series=bonus_series,
+        )[0]
 
     return sorted(personagens, key=_power, reverse=True)
 
@@ -233,12 +274,16 @@ def recompensa_andar(andar):
     return 50 * andar
 
 
-def _calcular_contexto(guild_id, user_id):
+def _calcular_contexto(guild_id, user_id, ignorar_restricao=False):
     """Cálculo PURO (sem efeito colateral) - reaproveitado por `preview_
     andar` (mostra antes de arriscar, resolução é determinística, então
     "planejar antes de clicar" faz sentido de verdade aqui) e `tentar_
     andar` (mesmo cálculo + credita recompensa/avança andar só se
-    venceu). Devolve `None` se a Party estiver vazia."""
+    venceu). Devolve `None` se a Party estiver vazia.
+
+    `ignorar_restricao` (2026-09-01, item 🗝️ Chave da Torre) - "a Chave
+    não reduz o Power necessário e não garante vitória, só remove a
+    restrição daquele andar"."""
     equipe = db.obter_equipe(guild_id, user_id, "party")
     if not equipe:
         return None
@@ -251,6 +296,7 @@ def _calcular_contexto(guild_id, user_id):
     for p in equipe.values():
         power, nivel, categoria = power_personagem(p, guild_id, user_id)
         membros.append({
+            "id": p["id"],
             "nome": p["nome"],
             "nivel": nivel,
             "afinidade": p.get("afinidade", 1),
@@ -259,12 +305,13 @@ def _calcular_contexto(guild_id, user_id):
             "power": power,
         })
     power_total, categorias = calcular_power_party(membros, guild_id, user_id)
-    restricao_ok = checar_restricao(restricao, categorias)
+    restricao_ok = True if ignorar_restricao else checar_restricao(restricao, categorias)
     venceu = restricao_ok and power_total >= alvo
 
     return {
         "andar": andar, "alvo": alvo, "restricao": restricao, "restricao_ok": restricao_ok,
         "power_total": power_total, "membros": membros, "venceu": venceu,
+        "restricao_ignorada": ignorar_restricao,
     }
 
 
@@ -379,11 +426,12 @@ def montar_auto_party(guild_id, user_id):
     restricao = restricao_andar(andar)
     tamanho = db.MAX_POSICOES_EQUIPE
 
-    niveis, bonus_global, cache_classe = _contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series = _contexto_lote(guild_id, user_id)
     pool = []
     for p in colecao:
         power, _nivel, categoria = power_personagem(
             p, guild_id, user_id, nivel=niveis.get(p["id"], 1), bonus_global=bonus_global, cache_bonus_classe=cache_classe,
+            bonus_series=bonus_series,
         )
         pool.append({"id": p["id"], "power": power, "categoria_combate": categoria})
 
@@ -403,7 +451,8 @@ def preview_andar(guild_id, user_id):
     (nível/Party/Afinidade), não sorte. Devolve (ok, erro_ou_None,
     contexto_ou_None) - `contexto` NUNCA tem efeito colateral (nada é
     creditado/avançado aqui)."""
-    contexto = _calcular_contexto(guild_id, user_id)
+    chave_ativa = db.chave_torre_ativa(guild_id, user_id)
+    contexto = _calcular_contexto(guild_id, user_id, ignorar_restricao=chave_ativa)
     if contexto is None:
         return False, "Sua Party está vazia - monte uma equipe antes de tentar a Torre.", None
     return True, None, contexto
@@ -413,10 +462,17 @@ def tentar_andar(guild_id, user_id):
     """Núcleo da Torre - MESMO cálculo de `preview_andar`, mas credita a
     recompensa e avança o andar se `venceu`. SEM RNG - perder só significa
     "a Party ainda não é forte o suficiente", tentar de novo é sempre
-    permitido, sem cooldown. Devolve (ok, erro_ou_None, contexto_ou_None)."""
-    contexto = _calcular_contexto(guild_id, user_id)
+    permitido, sem cooldown. Devolve (ok, erro_ou_None, contexto_ou_None).
+
+    🔥 Chave da Torre (2026-09-01) - consumida NA TENTATIVA (vença ou
+    perca), nunca só na vitória - a Chave paga pelo direito de tentar sem
+    a restrição, não pelo resultado."""
+    chave_ativa = db.chave_torre_ativa(guild_id, user_id)
+    contexto = _calcular_contexto(guild_id, user_id, ignorar_restricao=chave_ativa)
     if contexto is None:
         return False, "Sua Party está vazia - monte uma equipe antes de tentar a Torre.", None
+    if chave_ativa:
+        db.definir_chave_torre_ativa(guild_id, user_id, False)
     if contexto["venceu"]:
         andar = contexto["andar"]
         recompensa = recompensa_andar(andar)
@@ -427,8 +483,77 @@ def tentar_andar(guild_id, user_id):
         # as recompensas podem ser maiores") - ×5 a cada 50 andares.
         xp = 10 * andar * (5 if andar % 50 == 0 else 1)
         db.creditar_xp_progressao(guild_id, user_id, xp)
+        # 🔥 Estatística por personagem (2026-09-01, pedido do usuário:
+        # "estatísticas de participação com sucesso na torre por
+        # personagens") - só em vitória, nunca em tentativa perdida.
+        db.registrar_vitoria_torre_personagens(guild_id, user_id, [m["id"] for m in contexto["membros"]])
         contexto["recompensa"] = recompensa
         contexto["novo_saldo"] = novo_saldo
         contexto["novo_andar"] = novo_andar
         contexto["xp_ganho"] = xp
     return True, None, contexto
+
+
+def _investir_em_massa(guild_id, user_id, orcamento, nivel_maximo, obter_atual, custo_ate, subir_ate, colecao=None):
+    """Motor genérico (2026-09-01, pedido do usuário: "permitir aumentar
+    afinidade e nível em massa das personagens ordenadas pelo de maior
+    CP, apenas informando qnt pretende investir") - percorre a coleção
+    ORDENADA POR CP (maior primeiro, mesmo critério de sempre), gastando
+    o orçamento na personagem atual até ela bater no máximo ou o
+    orçamento acabar, só então passando pra próxima. `obter_atual(p)`/
+    `custo_ate(p, atual, alvo)`/`subir_ate(p, alvo)` isolam a única
+    diferença entre Nível (WiShards) e Afinidade (Soulstone) - reaproveita
+    a MESMA varredura/ordenação pras duas, nunca 2 cópias do loop.
+    `colecao` (opcional, 2026-09-03, pedido do usuário: "botao la tbm p
+    maximizar nivel e afinidade da serie, assim como é o em massa") -
+    escopo alternativo à coleção INTEIRA (default `None` = `db.
+    colecao_do_usuario`), usado pelo navegador de Série Favorita pra
+    investir só nas personagens QUE O JOGADOR JÁ POSSUI daquela série.
+    Devolve (gasto_total, detalhes) - `detalhes` só de quem realmente
+    mudou, na ordem investida."""
+    if colecao is None:
+        colecao = db.colecao_do_usuario(guild_id, user_id)
+    colecao = ordenar_por_power(colecao, guild_id, user_id)
+    saldo_restante = orcamento
+    detalhes = []
+    for personagem in colecao:
+        if saldo_restante <= 0:
+            break
+        atual = obter_atual(personagem)
+        if atual >= nivel_maximo:
+            continue
+        melhor_alvo = atual
+        for alvo in range(atual + 1, nivel_maximo + 1):
+            if custo_ate(personagem, atual, alvo) <= saldo_restante:
+                melhor_alvo = alvo
+            else:
+                break
+        if melhor_alvo > atual:
+            custo_final = custo_ate(personagem, atual, melhor_alvo)
+            ok, _mensagem = subir_ate(personagem, melhor_alvo)
+            if ok:
+                saldo_restante -= custo_final
+                detalhes.append((personagem, atual, melhor_alvo))
+    return orcamento - saldo_restante, detalhes
+
+
+def investir_nivel_em_massa(guild_id, user_id, orcamento_wishards, colecao=None):
+    """Sobe Nível (WiShards) da MAIOR CP pra menor - Seção acima."""
+    return _investir_em_massa(
+        guild_id, user_id, orcamento_wishards, db.NIVEL_MAXIMO_PERSONAGEM,
+        obter_atual=lambda p: db.nivel_personagem(guild_id, user_id, p["id"]),
+        custo_ate=lambda p, atual, alvo: db.custo_total_ate_nivel(p["raridade"], atual, alvo),
+        subir_ate=lambda p, alvo: db.subir_nivel_ate(guild_id, user_id, p["id"], alvo),
+        colecao=colecao,
+    )
+
+
+def investir_afinidade_em_massa(guild_id, user_id, orcamento_soulstone, colecao=None):
+    """Sobe Afinidade (Soulstone) da MAIOR CP pra menor - Seção acima."""
+    return _investir_em_massa(
+        guild_id, user_id, orcamento_soulstone, db.NIVEL_MAXIMO_AFINIDADE,
+        obter_atual=lambda p: db.afinidade(guild_id, user_id, p["id"]),
+        custo_ate=lambda p, atual, alvo: db.custo_total_ate_afinidade(atual, alvo),
+        subir_ate=lambda p, alvo: db.subir_afinidade_ate(guild_id, user_id, p["id"], alvo),
+        colecao=colecao,
+    )

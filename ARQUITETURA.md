@@ -1022,6 +1022,871 @@ pedir_prova_soulmate` ficam intactos e DORMENTES (ninguém mais aciona) -
 reaproveitar ou apagar de vez fica pra quando a conversão por Soulstone
 for desenhada de verdade.
 
+## Batalha 5x5 com Aposta de Personagem (2026-09-01)
+
+Pedido do usuário ("Batalha apostando waifu - Obrigatorio ser junto 5x5 -
+1 batalha por vez - 3vit ganha") - especificação COMPLETA (18 seções)
+trazida pelo próprio usuário depois de eu perguntar o que a aposta
+realmente move (transferência de personagem de verdade, não só
+recompensa) e como o time é formado (1 jogador = 1 Party de 5, não 5
+pessoas). PvP 1x1 novo, arquitetura DELIBERADAMENTE separada da Torre:
+
+- **Reaproveita a Party existente, mas dá peso NOVO à ordem** - até esta
+  leva, `colecao_equipe.posicao` existia mas nada no jogo lia o VALOR da
+  posição (só o conjunto de quem tá lá dentro). A Batalha usa a ordem como
+  a "formação secreta" dos 5 confrontos (Seção 7) - motivo de reaproveitar
+  a Party em vez de inventar uma formação própria só pra isso.
+- **CP não decide nada aqui** (Seção 4/18, ao contrário da Torre) - é
+  Jokenpô de categoria de combate: DPS vence Support, Support vence Tank,
+  Tank vence DPS (fechado, cada categoria vence 1 e perde pra 1, nunca
+  duas - preserva a simetria 33,3%/33,3%/33,3% contra uma escolha
+  desconhecida que a Seção 5 exige). Categorias iguais SEMPRE empatam,
+  mesmo com CP muito diferente - de propósito, senão quebraria a simetria
+  do sistema (Seção 6).
+- **Resolução determinística + revelação gradual** - as 5 posições são
+  fixadas no momento em que cada lado "fecha" a Party (desafiante na
+  criação do desafio, defensor ao montar defesa), reveladas 1 confronto
+  por vez (Seção 10, suspense) até alguém fechar 3 vitórias (Seção 11).
+  Empate nas 5 posições = Morte Súbita (Seção 12): escolha secreta de
+  categoria por AMBOS os jogadores, repetida até sair um vencedor -
+  diferente do resto da resolução (que é 100% determinística a partir das
+  Parties já fixadas), a Morte Súbita É a única mecânica com escolha em
+  tempo real dos 2 lados.
+- **Aposta = Raridade × Preço de Mercado (Seção 2)** - preço de mercado
+  reaproveita `db.valor_base_wishards` (a MESMA referência estável de
+  raridade usada em claim/reencontro/divórcio) - a Seção 16 do documento
+  original avisa explicitamente contra usar "último preço negociado"
+  (manipulável por negociação artificial) e deixa a fórmula exata como
+  "decisão separada"; `db.valor_base_wishards` já é resistente a
+  manipulação por natureza (fixo por raridade, não depende de trocas).
+- **Risco assimétrico (Seção 3/13/17)** - desafiante arrisca WiShards
+  (debitados NA HORA da criação do desafio, antes até do defensor
+  responder); defensor arrisca a PRÓPRIA personagem. Se o desafiante
+  vencer: leva a personagem (`db.transferir_personagem`, Afinidade NUNCA
+  acompanha - mesma regra de sempre) e os WiShards apostados simplesmente
+  SOMEM da economia (sink - "João não recebeu os 3.600 WiShards", nunca
+  voltam pro desafiante nem vão pro defensor). Se o defensor vencer: ele
+  MANTÉM a personagem E recebe a aposta inteira do desafiante.
+- **Soulmate é proteção permanente contra desafio** (Seção 14) - checado
+  na criação do desafio E de novo se o dono mudar no meio do caminho
+  (proteção contra corrida - ver "restart-safe" abaixo).
+- **Anti-perseguição (Seção 15)** - cooldown de 24h por PAR desafiante→
+  defensor (`colecao_batalha_cooldown`) + limite de 3 desafios RECEBIDOS
+  por dia por defensor, qualquer desafiante (`colecao_batalha_defesas_
+  hoje`, reseta sozinho por `data` mudar, sem job/scheduler). "1 batalha
+  por vez" (pedido original do usuário) interpretado como POR JOGADOR -
+  nem desafiante nem defensor podem estar em 2 desafios ativos ao mesmo
+  tempo (`db.batalha_ativa_do_jogador`), guild-wide.
+
+**Estado 100% em `colecao_batalha_desafios` (nunca em memória do
+processo)** - decisão deliberada, diferente de `ViewClaimMultiplo`/
+`ViewTroca` (que aceitam "estado em memória, não sobrevive a um restart"
+como limitação conhecida). Como há WiShards já debitados e uma personagem
+em risco real, um restart do bot no meio de um desafio NÃO PODE travar
+ninguém nem perder dinheiro - `ViewBatalhaHub` (botão "⚔️ Batalha" no hub)
+sempre RECONSTRÓI o estado inteiro a partir do banco a cada abertura/
+clique (mesmo padrão já usado por `_ViewNivel`/`_ViewTorre`, "sempre lê
+estado FRESCO"), nunca depende de uma mensagem específica sobreviver. A
+notificação do desafio ao defensor (`_anunciar_desafio`) é só INFORMATIVA
+(texto simples, sem botão nenhum) - a ação de verdade sempre passa pelo
+hub, cada jogador abrindo o PRÓPRIO (`/waifu` -> ⚔️ Batalha), nunca um
+botão que os 2 dividem numa mensagem só.
+
+`pandora/batalha.py` - motor PURO (zero discord.py, mesmo espírito de
+`torre.py`): `resolver_confronto`/`resolver_rodadas` (Jokenpô + parada em
+3 vitórias), `calcular_aposta`/`preco_mercado`, `iniciar_desafio` (valida
+Seções 1/7/14/15 + debita a aposta), `montar_defesa` (congela a Party do
+defensor, re-checa que ele ainda tem a personagem - cancela+reembolsa se
+não tiver mais), `registrar_escolha_morte_subita` (compara as 2 escolhas
+assim que a 2ª chega, limpa e repete se empatar). `cancelar_expirados`
+(desafios `aguardando_defensor` há mais de 24h sem resposta - reset
+preguiçoso sob demanda, chamado sempre que `ViewBatalhaHub` abre, sem job
+novo) devolve o dinheiro ao desafiante se o defensor nunca responder.
+
+**Validado numa CÓPIA da produção** (nunca o banco real - 2 guilds de
+teste sintéticas, times de DPS/Support/Tank reais do catálogo): Jokenpô
+fechado nos 6 confrontos possíveis, desafiante vencendo 3-0 (transferência
++ WiShards SOME, defensor não recebe nada), defensor vencendo 3-0 (recebe
+a aposta, mantém a personagem), proteção de Soulmate rejeitando o
+desafio, cooldown de 24h bloqueando um 2º desafio ao mesmo alvo, bloqueio
+de "1 batalha por vez", Morte Súbita completa (5 empates -> escolha
+secreta -> 1ª escolha não resolve sozinha -> 2ª escolha decide, DPS vence
+Support). **Nenhum clique real no Discord ainda** - a busca de personagem
+na coleção ALHEIA (`_ViewEscolherAlvoBatalha`, reaproveita `_ModalBuscar
+Personagem` sem nenhuma mudança, já aceitava qualquer coleção como
+parâmetro) e a revelação gradual editando a mesma mensagem (`_resolver_e_
+revelar`, pausa de 1,5s por rodada) só passaram por leitura de código,
+não por um teste ao vivo ainda.
+
+## World Boss: Evento Cooperativo (2026-09-01)
+
+Pedido do usuário - spec completa (25 seções) trazida de uma vez, ver
+`PANDORA_worldboss_evento_cooperativo.md`. Evento PvE cooperativo,
+diferente de tudo que existia até aqui no PANDORA (Torre/Batalha são sob
+demanda, iniciados por um clique) - precisa de um RELÓGIO PRÓPRIO: aparece
+4x/dia em horários fixos (10h/14h/18h/22h, **horário de Brasília, UTC-3
+fixo** - Brasil não observa mais horário de verão desde 2019, então um
+offset fixo é correto e evita depender do pacote `tzdata`, que não vem por
+padrão no Python do Windows - testado nesta sessão, faltava), abre 10min
+de inscrição, e resolve 1 turno/minuto sozinho depois disso.
+
+- **`SchedulerWorldBoss`** (`pandora/worldboss.py`, `discord.ext.tasks.
+  loop(seconds=30)`, mesmo padrão de `auto_colecionador.py`) - só roda na
+  instância "completo" do ERIS (mesmo critério de `AutoColecionadorUsuarios`
+  - é onde vive o painel `/waifu` -> 🐉 World Boss). 3 checagens
+  independentes por tick, cada uma 100% derivada do banco: (1) spawnar um
+  Boss novo nos 4 horários fixos por guild (marcador anti-duplicidade em
+  memória, mesmo espírito de `_ultimo_roll`); (2) fechar inscrições vencidas
+  (`inscricoes_fecham_em <= agora`); (3) executar turnos vencidos
+  (`proximo_turno_em <= agora`). Nenhum estado de JOGO mora em memória do
+  processo - um restart do bot no meio de um combate não perde turno nem
+  trava o evento, o próximo tick de 30s simplesmente continua de onde o
+  banco disse que estava (mesma filosofia "restart-safe" da Batalha 5x5).
+- **Time agregado, não personagens individuais (Seção 13)** - depois de
+  fechadas as inscrições, o CP congelado (snapshot, Seção 7) de cada
+  categoria é SOMADO; o combate resolve "1 TIME vs. 1 BOSS", nunca
+  personagem-por-personagem. Conversão (Seção 14/15):
+  `Multiplicador(CP) = 1 + √(CP / REFERENCIA_CP)` (crescimento
+  desacelerado, primeiro palpite igual toda constante nova do PANDORA) -
+  `Dano Base × mult(CP DPS)` / `HP Base × mult(CP Tank)` /
+  `Cura Base × mult(CP Support)`.
+- **Entrada manual por TOGGLE (Seção 4/5/6)** - `worldboss.
+  alternar_categoria` alterna 1 categoria no conjunto permitido do jogador
+  (clicar de novo na MESMA categoria REMOVE ela, esvaziar o conjunto tira o
+  jogador do evento) - decisão de design (não estava explícito na spec,
+  mas resolve "como sair"/"como reduzir o conjunto" sem precisar de um
+  botão "sair" separado, com só 3 botões DPS/Tank/Support persistentes).
+  `personagem_id`/`categoria`/`cp` são sempre RECALCULADOS a partir do
+  conjunto (nunca editados direto) - a personagem de maior CP dentre as
+  categorias permitidas.
+- **Entrada automática (Seção 8/9)** - só processada em `fechar_
+  inscricoes`, DEPOIS de fechar as manuais (prioridade manual > automática
+  garantida pela ORDEM de execução, nunca precisa checar explicitamente).
+  Preferência de categorias em `colecao_worldboss_auto`, mesmo padrão de
+  `colecao_auto_colecionar_usuarios` (Modo Auto-coleta do Colecionador).
+- **Identidade dos bots (Seção 11, pergunta feita ao usuário)** - o ERIS
+  tem 2 contas de bot reais (papel "completo"/GAIA e papel "musica"), mas
+  `SchedulerWorldBoss` só roda na instância "completo" e não tinha acesso
+  ao ID Discord da conta "musica" à mão. Resposta do usuário: "o CP dos
+  bots vai ser a média dos players participante" - `_entrar_bots` usa 2
+  `user_id` SINTÉTICOS ("bot:1"/"bot:2", nunca colidem com um snowflake
+  real), `personagem_id = NULL`, CP = média dos participantes HUMANOS
+  daquele evento (calculada 1x no fechamento). Prioridade de categoria
+  (Seção 11): primeiro cobre categorias com ZERO humanos (garante 1 DPS+1
+  Tank+1 Support); bot(s) sem categoria obrigatória reforçam a de MENOR CP
+  agregado (critério escolhido pra "melhor contribuição disponível" - sem
+  personagem própria pra bot escolher no modelo de CP-média).
+- **10 mecânicas especiais (Seção 22)** - `pandora.worldboss.
+  executar_turno` resolve todas num único motor genérico (7 passos da
+  Seção 18), com branches explícitos por `mecanica` (decisão deliberada:
+  um hook/plugin totalmente abstrato pra só 10 casos, cada um bem
+  diferente, seria uma abstração prematura - "3 linhas parecidas é melhor
+  que abstração prematura"). `boss_atk_atual` (persistido) só muda de
+  verdade em Enfurecer (cresce 10%/turno) e Renascimento (novo patamar por
+  morte) - todo o resto (Adaptação-Tank/Barreira/Posturas-Ruína/Cabeça
+  Vermelha/Caos) é multiplicador TEMPORÁRIO só daquele turno
+  (`atk_efetivo`), nunca gravado de volta - decisão explícita pra não
+  confundir "crescimento permanente" com "modificador de fase/estado".
+- **Sem recompensa nesta leva (pergunta feita ao usuário)** - a spec
+  original não define WiShards/Soulstone/XP por vencer; resposta do
+  usuário: "só o combate, sem recompensa por enquanto". Implementado
+  exatamente assim - fica pra um pedido futuro separado, quando os
+  valores forem definidos.
+- **Validado só via simulação isolada** (nunca a produção nem um clique
+  real no Discord) - as 10 mecânicas testadas uma a uma com `evento`
+  sintético (Enfurecer/Drenar Vida/Adaptação nos 2 ramos/Ceifar (dispara
+  só no turno certo)/Renascimento (as 2 mortes + a 3ª que encerra)/
+  Barreira (absorve, quebra, excedente, fase de ATK)/Consumir/Posturas
+  (as 3 fases)/Cabeças (efeitos vivos + destruição por limiar)/Caos), MAIS
+  um ciclo de vida completo (spawn -> toggle de categoria (entra/sai/
+  reentra) -> auto-entrada -> bots -> fechar inscrições -> formar time ->
+  combate turno-a-turno persistido via banco até resolução) numa cópia do
+  banco de produção. **Achado do próprio teste**: com CP real do catálogo
+  (na casa das centenas/poucos milhares por personagem), o time perde no
+  1º turno contra o ATK dos Bosses (12-17 mil primeiro-palpite) - confirma
+  que os valores-base (Seção 14, "devem ser calibrados com os dados reais
+  das contas") estão claramente descalibrados pra uso real, registrado
+  como pendência de alta prioridade no `TODO.md` (mesmo padrão da Cidade,
+  que precisou de recalibração depois de testar contra uma conta real).
+
+## Correção na Batalha 5x5 - aposta paga ao desafiado + fórmula da Loja (2026-09-01)
+
+Duas correções do usuário na MESMA mensagem que trouxe a spec de
+Recompensas/Conquistas do World Boss (ver abaixo):
+
+- **"Desafios por waifus tem de pagar os WiShards para o desafiado, n
+  sumir"** - `batalha._finalizar_vitoria_desafiante` passou a creditar a
+  aposta ao DEFENSOR mesmo quando o desafiante vence (reverte o "sink" da
+  1ª implementação, que seguia a spec original à risca - Seção 17: "João
+  não recebeu os 3.600 WiShards"). Agora perder a personagem SEMPRE vem
+  com uma compensação em WiShards, nunca fica só no prejuízo.
+- **"tem de ser o valor daquela raridade na loja... multiplica por 2"** -
+  `batalha.preco_mercado` trocou `db.valor_base_wishards(raridade)`
+  (raridade×20, dava só 500 WiShards de aposta pra uma 5⭐) por `db.
+  PRECOS_LOJA[raridade] × 2` (5⭐: 10.000 WiShards) - `calcular_aposta`
+  não multiplica mais pela raridade de novo (`PRECOS_LOJA` já escala
+  sozinho). Validado numa cópia da produção: desafiante vence → defensor
+  recebe a aposta (não é mais sink); nova fórmula bate com `PRECOS_LOJA[r]
+  × 2` pra todas as raridades.
+
+## World Boss: Recompensas e Conquistas (2026-09-01)
+
+Pedido do usuário - spec completa (18 seções), ver
+`PANDORA_worldboss_recompensas_conquistas.md`. Recompensas na vitória
+(Seção 1: só participantes HUMANOS, nunca bots) + Conquistas (registro
+puro, Seção 15). Trouxe 2 subsistemas NOVOS reutilizáveis por qualquer
+sistema futuro (`pandora/conquistas.py`, `pandora/itens.py`), não só pro
+World Boss.
+
+- **`pandora/conquistas.py`** - catálogo FECHADO de 20 conquistas (4 por
+  contagem de vitórias, 10 por tipo de Boss, 6 situacionais), registro
+  guild-scoped (`colecao_conquistas`, PK guild+user+conquista - mesmo
+  critério guild-scoped de tudo mais no ecossistema, "conquistas da conta"
+  interpretado como "da conta NESSE servidor"). `conceder()` é idempotente
+  (`INSERT OR IGNORE`, devolve se era nova) - seguro chamar toda vitória
+  mesmo pra condições por contagem (Caçador/Veterano/Lenda da Caçada).
+- **`pandora/itens.py`** - catálogo FECHADO de 7 itens consumíveis
+  (Proteção/Revanche/Chave da Torre/Upgrade de Construção/Chamado/Roll
+  Permanente/Claim Permanente), inventário genérico (`colecao_
+  inventario`) + rolagem de drop raro (15% de chance por vitória,
+  pesos por item - Roll/Claim Permanente são os mais raros de propósito)
+  + compra na Loja normal (`comprar_item`, mesmos preços/itens do drop).
+  Cada "usar item" de verdade mora no sistema que ele afeta:
+  - **🛡️ Proteção** (`db.aplicar_protecao_pvp`/`esta_protegida_pvp`) -
+    `batalha.iniciar_desafio` confere isso ANTES de aceitar um desafio
+    (mesmo nível de proteção que Soulmate, mas via item em vez de
+    progressão).
+  - **⚔️ Revanche** (`colecao_batalha_personagens_perdidas`) - toda
+    vitória do desafiante REGISTRA a personagem como perdida pelo
+    defensor (`_finalizar_vitoria_desafiante`); se o jogador que venceu
+    JÁ tinha perdido essa mesma personagem antes, marca como recuperada
+    automaticamente (fecha o ciclo, com ou sem Revanche de verdade -
+    qualquer vitória de volta conta). `batalha.iniciar_desafio_com_
+    revanche` reaproveita `iniciar_desafio` com um parâmetro interno
+    (`_ignorar_cooldown_e_limite`) que pula SÓ o cooldown de 24h e o
+    limite diário - todo o resto da validação (Soulmate/Proteção/aposta/
+    Party completa) continua valendo, "ainda precisa disputar através
+    das regras da batalha".
+  - **🗝️ Chave da Torre** (`colecao_torre_chave_ativa`, flag por
+    jogador) - `torre._calcular_contexto` ganhou `ignorar_restricao`
+    (usado por `preview_andar` E `tentar_andar`); consumida só em
+    `tentar_andar` (tentativa REAL), nunca em `preview_andar` - "a Chave
+    paga pelo direito de tentar sem a restrição, não pelo resultado".
+  - **🏗️ Upgrade de Construção** (`colecao_construcoes`, nível por
+    guild+user+área) - `cidade._poder_area` ganhou `multiplicador_
+    construcao` (1 + 10%×nível), aplicado nos DOIS lugares que calculam
+    Poder (`coletar_producao_pendente` E `atualizar_snapshot_bonus`, via
+    um helper `_multiplicador_construcao` novo) - áreas batem 1:1 com
+    `cidade.FUNCOES_CIDADE` (Militar/Saúde/Cultura/Administração/
+    Comércio/Arcano), nenhuma tradução de nome necessária.
+  - **📯 Chamado** (`colecao_worldboss_proximo_forcado`, 1 boss forçado
+    por guild) - `worldboss.iniciar_evento` consome isso ANTES do sorteio
+    aleatório (`db.consumir_worldboss_forcado` já apaga a linha ao ler,
+    nunca aplica 2x).
+  - **🎲/💎 Roll/Claim Permanente** - 2 colunas novas em `colecao_
+    estado_jogador` (`bonus_rolls_permanente_drop`/`bonus_claims_
+    permanente_drop`), SEPARADAS do upgrade pago da Loja (`nivel_
+    upgrade_rolls`/`nivel_upgrade_claims`) - `gacha._limite_rolls_atual`
+    e o cálculo de `limite_claims` em `_processar_claim` somam esse
+    bônus junto. Mesmo limite (5, primeiro palpite) vale pra drop E
+    compra juntos (`itens.LIMITE_ROLL_PERMANENTE`/`LIMITE_CLAIM_
+    PERMANENTE`) - um drop que ultrapassaria o teto vira WiShards de
+    consolação em vez de simplesmente descartado.
+- **Granting da 5★ garantida reaproveita o motor de roll/claim de
+  verdade** (`worldboss.SchedulerWorldBoss._conceder_5_estrela`) - sorteia
+  entre 5★ sem dono OU já do próprio jogador (nunca de outro jogador, pra
+  a recompensa "garantida" nunca virar prêmio de terceiro), resolve via
+  `gacha._resolver_resultado` (mesma função de um roll normal - decide
+  livre/reencontro sozinha) e, se "livre", credita de verdade via
+  `gacha._claim_sem_cooldown` (mesmo núcleo do claim humano/auto-
+  colecionador - Seção 2: "funciona exatamente como se tivesse obtido
+  através do fluxo normal"). Precisa de um `discord.Member` de verdade
+  (embed de confirmação usa `.mention`/`.display_name`) - só roda dentro
+  do scheduler (que tem acesso a `client.get_guild(...).get_member(...)`),
+  nunca no motor puro de `pandora.worldboss`.
+- **Entrega por DM + resumo público** - recompensa individual (Seção 17,
+  claramente pessoal, "Suas recompensas") vai por DM pro jogador; um
+  resumo agregado (quem ganhou o quê, condensado) vai no canal do evento.
+  Notificação de Nova Conquista também por DM, mensagem separada da
+  recompensa.
+- **Validado numa CÓPIA da produção** (nunca a produção, nenhum clique
+  real no Discord ainda): compra de item + limite de Roll/Claim
+  Permanente respeitado (recusa a 6ª compra), bônus refletido em `gacha.
+  _limite_rolls_atual`, Proteção bloqueando um desafio de verdade,
+  Upgrade de Construção aumentando o multiplicador de Poder da Cidade
+  (Nível 1 = ×1,10 confirmado), Chamado forçando o Boss do próximo evento
+  E sendo consumido (não aplica 2x), Chave da Torre ativando, as 20
+  conquistas concedidas idempotentemente, Revanche ignorando o limite
+  diário de defesas (desafio normal rejeitado no limite, desafio com
+  Revanche aceito), e a 5★ garantida creditada de verdade via um mock de
+  `discord.Member` chamando o MESMO `gacha._claim_sem_cooldown` de um
+  claim humano.
+
+## World Boss: correção de ordem do turno e recalibração (2026-09-02)
+
+Achado em produção de verdade (não simulação) - print real de um evento
+contra o 🌑 Devorador do Abismo, time de 3 jogadores (1 DPS/1 Tank/1
+Support, CP 26.297/categoria): o time morreu no turno 1 (Boss ATK 13.500
+> HP do time 12.880). Duas causas distintas em `pandora/worldboss.py`:
+
+- **Bug de ordem contra a própria Seção 18** de
+  `PANDORA_worldboss_evento_cooperativo.md` ("5. Time recebe dano → 6.
+  Support aplica cura → 7. Estado final é calculado") - o código antigo
+  checava derrota logo depois do ataque do Boss, ANTES de aplicar a cura -
+  Support nunca conseguia evitar uma morte, justamente quando mais
+  importava. **Corrigido pra dano líquido por turno** (pedido do usuário:
+  "dano recebido = dano causado - dano curado") - `atk_efetivo` e `cura`
+  são calculados primeiro (com todos os modificadores de mecânica de cada
+  um), só então `dano_liquido = atk_efetivo - cura` muda o HP do time de
+  uma vez, e o cheque de derrota roda depois disso.
+- **`DANO_BASE`/`HP_BASE`/`CURA_BASE` descalibrados** (Seção 14 pedia
+  calibração com dados reais, nunca tinha acontecido - HP_BASE=6000 já
+  nascia menor que o ATK de QUALQUER Boss do catálogo, 12-17 mil).
+  Recalibrados (10.000→14.000 / 6.000→45.000 / 500→7.500) via simulação
+  do motor real (`executar_turno` chamado direto, 60 combates por Boss,
+  script descartável) usando o CP observado na print (26.297/categoria):
+  **87% de vitória agregada** nos 10 Bosses - 8 deles em 70-100%, ☠️
+  Senhor da Morte (Ceifar, dano periódico direto) em 70% como degrau
+  intermediário, 🐉 Dragão Ancião (Enfurecer, ATK +10%/turno composto) em
+  ~0% - não é bug: a mecânica dele favorece dano MUITO mais rápido do que
+  esse time entrega, exatamente o "efeito do Boss como diferencial real de
+  dificuldade" pedido pelo usuário, em vez de tunar HP/ATK Boss a Boss (o
+  catálogo `CATALOGO_BOSSES` não mudou nenhum valor).
+- **Variação leve por turno** (`VARIACAO_TURNO = 0.10`, novo) - ±10% tanto
+  no dano causado pelo time quanto no ATK do Boss a cada turno, pra o
+  combate não ser 100% determinístico turno a turno (pedido do usuário).
+- **Validado só via simulação do motor** (`executar_turno` chamado direto
+  com um `evento` sintético, nunca um evento real no scheduler/Discord) -
+  continua pendente confirmar ao vivo se a taxa de vitória se sustenta com
+  composições reais (jogadores nem sempre concentram CP numa categoria só
+  como no teste) e se o ritmo de ~15-25 turnos fica bom de acompanhar no
+  canal (ver `TODO.md`).
+
+## World Boss: 5 dificuldades independentes + CP recomendado por simulação (2026-09-02)
+
+Pedido do usuário depois da recalibração acima, em 2 rodadas de correção
+sobre a 1ª tentativa (registro do erro fica aqui de propósito, pra não
+repetir):
+
+1. **1ª tentativa (errada)**: dei a cada um dos 10 Bosses uma dificuldade
+   FIXA no catálogo (Dragão Ancião sempre "difícil", etc.). Corrigido pelo
+   usuário: **"cada boss pode variar entre todas as dificuldades"** -
+   dificuldade não é propriedade do Boss, é sorteada à parte no spawn,
+   independente de qual dos 10 saiu. E não existia nenhuma dificuldade
+   nomeada antes desta sessão (só hp/atk fixos por Boss) - pedido final:
+   **"mantém os status atual como difícil"** (os números originais do
+   catálogo viram a base "Difícil") **"e tenha 5 dificuldades Facil Normal
+   Dificil Elite Pesadelo"**.
+2. **"CP recomendado"" também estava errado** - a 1ª versão calculava
+   `personagem_mais_forte_do_servidor × multiplicador`. Achado do usuário:
+   **"se vc ta multiplicando em cima do personagem mais forte, vai ser
+   impossivel bater o recomendado"** - confunde CP de UMA personagem com o
+   CP AGREGADO de uma categoria inteira no combate; numa categoria com
+   poucos jogadores fortes, o agregado nunca passa de ~1× o CP do
+   personagem mais forte sozinho, então multiplicadores >1× viravam metas
+   inatingíveis pra servidores pequenos. `torre.personagem_mais_forte_do_
+   guild`/`db.donos_do_guild` (da 1ª tentativa) foram REMOVIDAS - não sobrou
+   nenhum uso pra elas depois da correção.
+
+**Desenho final**:
+- **`DIFICULDADES`** (`worldboss.py`) - 5 tiers (🟢 Fácil/🔵 Normal/🟠
+  Difícil/🔴 Elite/🟣 Pesadelo), cada um só um multiplicador de HP/ATK
+  aplicado sobre o hp/atk BASE do Boss sorteado (`CATALOGO_BOSSES`
+  continua com só 1 número por Boss, o "Difícil" original) - Difícil =
+  1,0× (pedido: "mantém os status atual"), os outros escalam pra cima/
+  baixo (0,45× / 0,70× / 1,20× / 1,50×, calibrados simulando os 10 Bosses
+  no CP real observado: Fácil/Normal ficam vitória garantida nesse CP,
+  Difícil reproduz a mesma distribuição de antes (87% agregado, Enfurecer
+  sendo a exceção dura), Elite/Pesadelo sobem bem além do que esse CP
+  aguenta - teto de propósito).
+- **`iniciar_evento`** sorteia o TIPO do Boss e a DIFICULDADE em 2 sorteios
+  independentes (`random.choice` cada um) - qualquer um dos 10 Bosses pode
+  sair em qualquer uma das 5 dificuldades, 50 combinações possíveis. Item
+  📯 Chamado continua só forçando o TIPO, dificuldade sempre sorteada.
+- **`worldboss.cp_recomendado(boss_tipo, dificuldade)`** - REESCRITA
+  (2026-09-02, correção acima): busca binária (~20 rodadas) contra o motor
+  de combate REAL (`_taxa_vitoria_simulada`, `executar_turno` chamado
+  direto com um evento sintético) achando o CP-por-categoria que bate 65%
+  de taxa de vitória contra ESSE Boss NESSA dificuldade - nunca mais
+  baseado no personagem mais forte de ninguém, sempre um valor que a
+  PRÓPRIA simulação prova ser alcançável. ~0,1-0,6s por chamada (aceitável,
+  roda 1x por spawn, 4x/dia).
+- **Snapshot no spawn, nunca recalculado** (mesmo espírito do CP congelado
+  dos participantes, Seção 7) - `dificuldade`/`cp_recomendado` gravados 1x
+  em `colecao_worldboss_eventos` (2 colunas novas, migração aditiva
+  guardada por `PRAGMA table_info`).
+- **Exibido em `embed_aparicao` e `embed_status`** (fase de inscrições) -
+  campo "🎯 Dificuldade: {tier}" com o CP recomendado por categoria.
+- **Validado**: migração + `iniciar_evento` + os 2 embeds rodados contra
+  uma CÓPIA do `pandora.db` real (nunca produção) - conferido que o hp/atk
+  do evento batem com base×multiplicador da dificuldade sorteada, e que
+  `cp_recomendado` cresce monoticamente Fácil→Pesadelo pro mesmo Boss
+  (ex.: Devorador do Abismo: 0 / 4.000 / 23.500 / 45.000 / 90.500). Nunca
+  clicado de verdade no Discord ainda (mesma pendência da seção anterior).
+
+## Perfil redesenhado + Séries Favoritas (2026-09-02)
+
+Pedido do usuário: "Vamos remover aquelas séries que vc pos no perfil,
+deixar lá informações importantes apenas do jogador" + uma sugestão
+externa colada e endossada ("acho bem melhor") - resumo do jogador virou
+compacto, listar TODA série tocada virou uma escolha deliberada (Séries
+Favoritas) com bônus de CP de verdade em cima.
+
+- **`/perfil` (`paineis._montar_embed_perfil`)** - resumo do topo
+  (personagens/nível máximo/afinidade máxima/soulmates, `db.resumo_
+  perfil_geral`) + tabela por raridade 1★-5★ (`db.resumo_perfil_
+  raridade`, 1 query só via `GROUP BY p.raridade`, sempre com percentual
+  junto da contagem - "310 personagens no nível máximo isoladamente
+  começa a dizer pouco") + Séries Favoritas + Conquistas/Torre/
+  Soulstones (`db.conquistas_do_jogador`/`db.andar_atual_torre`/`db.
+  saldo_soulstone`, já existiam). `db.progresso_por_serie` (listava TODA
+  série já tocada, até 25) foi REMOVIDA - não sobrou nenhum uso.
+- **Séries Favoritas (`pandora/series_favoritas.py`, módulo novo)** - até
+  `SLOTS_MAXIMO` (25 desde 2026-09-03 - era 10 = 5 base + 5 upgrades,
+  subiu pra 5 base + 20 upgrades pagos, `db.PRECOS_UPGRADE_SLOT_SERIE_
+  FAVORITA`, mesmo padrão de preço escalonado do upgrade de rolls/claims
+  - 25 é o TETO de opções de 1 único `discord.ui.Select`, não arbitrário,
+  ver "Navegador de Série + teto de 25" mais abaixo) séries escolhidas
+  pelo jogador, cada uma com 3 marcos
+  INDEPENDENTES calculados por `db.estatisticas_series` (1 query
+  agregada, só das séries favoritadas, nunca escaneia o catálogo
+  inteiro):
+  - 📚 **Coleção Completa** - possui 100% do catálogo daquela série.
+  - ⭐ **Maestria Completa** - toda personagem QUE TEM daquela série está
+    no nível máximo (`db.NIVEL_MAXIMO_PERSONAGEM`).
+  - 💕 **Soulbond Completo** - toda personagem que tem daquela série é
+    Soulmate.
+  - Bônus CUMULATIVO (+5%/+5%/+10%, até +20%) - só sobre personagens
+    DAQUELA série (nunca CP global, pedido explícito do usuário: "isso
+    inevitavelmente vira outra fonte enorme de power creep").
+- **Snapshot pré-calculado** (`colecao_series_favoritas_bonus`, mesmo
+  padrão de `cidade.atualizar_snapshot_bonus`) - calcular completude é
+  caro (varre a coleção filtrada por série), nunca roda no caminho quente.
+  `series_favoritas.recalcular_bonus` é chamado depois de trocar uma
+  série favorita E nos MESMOS 8 pontos de `paineis.py` que já chamavam
+  `cidade.atualizar_snapshot_bonus` (claim/nível/afinidade/divórcio/
+  merge/Party) - reaproveita o gatilho existente em vez de duplicar a
+  lista.
+- **`torre.power_personagem` ganhou `bonus_series`** (4º item novo de
+  `torre._contexto_lote`, leitura barata de `db.bonus_series_favoritas`) -
+  aplicado como mais um multiplicador (`× (1 + bonus_serie)`), mesmo
+  princípio do bônus global/de classe já existentes. Os 7 lugares que
+  desempacotavam `_contexto_lote` em 3 valores (`batalha.py`, `cidade.py`,
+  `paineis.py` ×2, `torre.py` ×2, `worldboss.py`) foram atualizados pros
+  4 - bônus de série passa a valer em QUALQUER cálculo de CP (Torre,
+  Batalha, World Boss, Cidade), não só no Perfil.
+- ~~Cooldown de 7 dias pra trocar um slot já ocupado~~ **REMOVIDO
+  (2026-09-03)** - existia (`db.COOLDOWN_DIAS_TROCA_SERIE_FAVORITA`,
+  pedido do usuário: "trocar uma Série Favorita não pode ser
+  instantaneamente explorável... vou usar Megumin -> favorito KonoSuba
+  -> ganho +20% -> luto -> tiro KonoSuba"), mas o próprio usuário pediu
+  pra tirar depois de esbarrar nele na prática ("remove esse bloqueio
+  Esse slot só pode trocar de novo em 7 dia(s)") - `db.definir_serie_
+  favorita` não checa mais `bloqueado_ate`, sempre grava `None` (coluna
+  mantida na tabela, sem migração destrutiva). Trocar Série Favorita
+  volta a ser sempre instantâneo, sem limite de frequência.
+- **Busca de série case-insensitive** (`db.encontrar_serie_por_nome`,
+  resolve pra grafia canônica do catálogo) com sugestões por prefixo
+  (`db.series_do_catalogo`) quando o nome digitado não bate com nada.
+- **Validado**: migração + fluxo completo (1ª escolha instantânea, 2ª
+  tentativa no MESMO slot bloqueada com a data certa, slot DIFERENTE
+  ainda instantâneo, bônus de +20% aplicado de verdade em `power_
+  personagem` num teste sintético, embed do `/perfil` renderizado)
+  rodados contra uma CÓPIA do `pandora.db` real (nunca produção). Nunca
+  clicado de verdade no Discord ainda.
+- **Fora de escopo desta leva** (ver TODO.md): abrir uma Série Favorita
+  pra ver a lista completa de personagens faltando - hoje só mostra os
+  números agregados.
+
+## "GAIA nao respondeu a tempo" ao confirmar Batalha (2026-09-02)
+
+Achado do usuário testando ao vivo: confirmar um desafio de Batalha 5x5
+contra um bot (Ai Hayasaka/Artoria Pendragon, 10.000 WiShards em risco)
+travava nesse erro genérico - mesma classe de bug já vista antes no
+projeto (interação do Discord expira em 3s, qualquer coisa bloqueante
+ANTES do primeiro ack derruba o token).
+
+- **Causa**: os 3 fluxos de confirmação de Batalha (`paineis.py`) chamavam
+  `batalha.iniciar_desafio`/`montar_defesa`/`iniciar_desafio_com_revanche`
+  via `asyncio.to_thread` ANTES de qualquer `response.defer()`/
+  `edit_message` - o caso mais grave era desafiar um BOT: 2 chamadas
+  `to_thread` em sequência (`iniciar_desafio` + `montar_defesa`) rodavam
+  as DUAS antes do primeiro ack. `_resolver_e_revelar` já documentava a
+  precondição no próprio docstring ("interaction já precisa estar
+  deferida/respondida") - só quem chamava não cumpria.
+- **Corrigido nos 3**: `Desafiar` (`_personagem_escolhida` -> `_confirmar`,
+  inclusive o ramo "enfrentar bot"), `Montar Defesa`
+  (`ViewBatalhaHub._montar_defesa` -> `_apos_formacao`), `Revanche`
+  (`_apos_formacao` da Revanche) - `response.defer()` sempre a PRIMEIRA
+  linha da função, antes de qualquer `to_thread`; as respostas
+  subsequentes (erro ou sucesso) viraram `edit_original_response` (a
+  interação já foi consumida pelo `defer()`, `response.edit_message` não
+  serve mais).
+- **Não validado ao vivo ainda** (só revisão de código + syntax/import
+  check) - o achado original foi reportado em produção, então confirmar
+  isso contra um bot de verdade é prioridade alta.
+
+## Auditoria de corrida claim/merge + correção do Merge (2026-09-02)
+
+Pedido do usuário depois de revisar o Merge novo: "Não pode de forma
+alguma deixar 2 jogadores terem a msm personagem. Antes do claim/merge
+tem q ter uma validação rigida, so de fato realizar todas as acoes apos o
+claim" + "N permita fazer merge de personagens no grupo".
+
+- **Auditoria dos 3 lugares que chamam `db.reivindicar`** (INSERT
+  atômico, `ON CONFLICT(guild_id, personagem_id) DO NOTHING`, PK
+  `(guild_id, personagem_id)` - estruturalmente impossível 2 linhas pro
+  mesmo personagem):
+  - `gacha._processar_claim`/`_claim_sem_cooldown` - já corretos (checa
+    `if not db.reivindicar(...)` ANTES de qualquer recompensa/efeito).
+  - `db.comprar_personagem` - já correto (debita, tenta reivindicar,
+    reembolsa se perder a corrida).
+  - `economia.executar_merge` (Merge novo) - **TINHA o bug**: removia as
+    5 sacrificadas ANTES de reivindicar a escolhida, sem checar o
+    resultado - se perdesse a corrida (ou se uma das 5 entrasse na Party
+    no meio do caminho, a checagem de Party só rodava na 1ª etapa),
+    ficava com as 5 removidas E nada em troca. Corrigido: reivindicar
+    primeiro, checar sucesso, só então remover as 5 - e revalidar Party
+    de novo na 2ª etapa (`validar_merge` bloqueia na 1ª, mas o jogador
+    escolhe o alvo numa interação separada depois, dando tempo de mudar a
+    Party no meio).
+  - `batalha._finalizar_vitoria_desafiante` usa `db.transferir_
+    personagem` (DELETE+INSERT pro MESMO personagem_id, não uma corrida
+    por um personagem LIVRE) - fora do escopo dessa auditoria (não hà
+    "2 pretendentes pra 1 vaga livre" nesse caso, a personagem já tem
+    dono conhecido no início da Batalha).
+- **Validado** (3 cenários: escolhida reivindicada por outra pessoa no
+  meio do Merge, uma das 5 entrando na Party no meio do Merge, fluxo
+  normal) contra uma CÓPIA do `pandora.db` real - nos 2 cenários de erro,
+  as 5 sacrificadas continuam do jogador (antes seriam perdidas).
+- **Desafio de Batalha travado cancelado** (2026-09-02, pedido do
+  usuário: "Desfaz esse desafio q ta aberto, foi de antes das
+  melhorias") - `id=1`, Ai Hayasaka (#3977), criado 2026-09-01 antes das
+  melhorias de Batalha por categoria, `aguardando_defensor` (não era bug -
+  "enfrentar bot" só resolve na hora quando o alvo É um bot de verdade,
+  `alvo.bot`; esse desafio provava por construção que o defensor era
+  humano, já que nunca teria ficado nesse status se fosse bot). Cancelado
+  direto no `pandora.db` de PRODUÇÃO via `db.cancelar_desafio_batalha(1)`
+  (sem reembolso necessário - nada tinha sido debitado na criação).
+
+## Merge vira escolha do jogador na mesma raridade (2026-09-02)
+
+Pedido do usuário: "Muda funcao do merge, ele vai deixar trocar 5 da msm
+raridade por 1 da msm raridade disponivel, a escolha".
+
+- **`economia.validar_merge`** (era `executar_merge`) - só valida as 5
+  personagens a sacrificar (distintas/donas/mesma raridade/fora da Party/
+  confirmação de Afinidade>1), devolve a raridade em vez de escolher um
+  alvo sozinha. O bloqueio de `raridade >= 5` ("não têm pra onde subir")
+  SUMIU - deixou de fazer sentido, o alvo agora é da MESMA raridade, então
+  5⭐ também mergeia (pra outra 5⭐).
+- **`economia.executar_merge`** (assinatura nova: `ids, escolha_id`) - só
+  executa depois que o jogador já escolheu. Revalida o essencial de novo
+  (corrida: a escolhida pode ter sido reivindicada por outra pessoa entre
+  a lista aparecer e o clique).
+- **`paineis._ViewEscolherMergeAlvo`** (nova) - 2º passo da UI, lista até
+  25 personagens LIVRES da mesma raridade (`db.personagens_livres_por_
+  raridade`, mesma fonte que a Loja usa pra "Comprar") num Select -
+  `_merge_selecionado` chama `validar_merge`, monta essa lista, só chama
+  `executar_merge` quando o jogador escolhe.
+- **Validado**: fluxo completo (sacrificar 5× 5⭐, listar livres da mesma
+  raridade, escolher, confirmar que as 5 sumiram e a escolhida é do
+  jogador) contra uma CÓPIA do `pandora.db` real. Nunca clicado de
+  verdade no Discord ainda.
+
+## Recompensa Diária escala com Progressão + item garantido (2026-09-02)
+
+Pedido do usuário: "Recompensa diaria multiplicada os wishards pelo nivel
+da progressao. e da 1 item raro".
+
+- **`db.reivindicar_diaria_com_recompensa`** - WiShards deixam de ser
+  `RECOMPENSA_DIARIA_WISHARDS` fixo (150) e viram `150 × nível de
+  Progressão` (`db.progressao_conta(...)["nivel"]`, SEM TETO - "a
+  personagem possui um limite de desenvolvimento. A conta não", mesmo
+  princípio já usado no bônus de CP global) - devolve `(ok, novo_saldo,
+  wishards_creditados)` agora (3-tupla, era 2 - único chamador,
+  `paineis._diaria`, já atualizado).
+- **`itens.sortear_item_diario()`** (novo) - reaproveita o MESMO catálogo/
+  pesos do drop raro do World Boss (`PESOS_DROP_RARO`), mas sem o portão
+  de `CHANCE_DROP_RARO` (15%) - todo resgate da Diária dá exatamente 1
+  item, nunca `None`. `paineis._diaria` chama isso + `itens.
+  conceder_item_drop` na sequência, mesmo padrão de concessão que o
+  World Boss já usava.
+- **Validado** numa CÓPIA do `pandora.db` real: nível de Progressão 17 ->
+  2.550 WiShards, nível simulado 7 -> 1.050 (bate com `150 × nível` nos
+  dois casos), 2ª tentativa no mesmo dia continua bloqueada, item sorteado
+  e concedido de verdade via `itens.conceder_item_drop`. Nunca clicado de
+  verdade no Discord ainda.
+
+## Auto-Defesa na Batalha + Morte Súbita removida (2026-09-02)
+
+Pedido do usuário: "coloca um modo defesa automatica, ele vai considerar
+cada escolha do desafiante, e montar sua escolha com base naq venceria
+ela, se tem 5 papel, ele pega 5 tesouras. E distribui em ordem aleatoria.
+Se o desafiado n responder em 10min, considera essa defesa automatica.
+Bots respondem na hr com essa logica. É possivel deixar configurado p
+players tbm" - veio logo depois de reportar um bug real de Morte Súbita
+(1x2 caindo em empate à toa) e pedir a remoção completa da mecânica (ver
+CHANGELOG.md, "Morte Súbita removida + bug real de empate").
+
+- **`batalha.defesa_automatica(ordem_desafiante)`** (nova) - pro Jokenpô
+  puro do jogo (`_VENCE_DE`: DPS>Support>Tank>DPS), monta o dict inverso
+  (`vencido -> vencedor`) e mapeia cada categoria da ordem do desafiante
+  pra quem vence ELA - se o desafiante põe 5× DPS, a defesa é 5× Tank,
+  sempre. Só a ORDEM das 5 escolhas é embaralhada (`random.shuffle`) -
+  a categoria de cada posição nunca é aleatória, é sempre a que vence.
+  `defesa_automatica_para_desafio(desafio_id)` busca a `ordem_desafiante`
+  salva e delega - substitui a antiga `formacao_aleatoria` (verdadeiramente
+  aleatória, sem contra-escolha nenhuma) em TODO lugar que resolvia contra
+  bot instantaneamente.
+- **3 gatilhos pro mesmo counter-pick, não 3 mecânicas diferentes**:
+  1. **Bot** (`alvo.bot`) - já existia (resolvia na hora), só trocou
+     `formacao_aleatoria` por `defesa_automatica_para_desafio`.
+  2. **Jogador com a opção ligada** - `colecao_estado_jogador.
+     auto_defesa_batalha_ativa` (coluna nova, migração guardada,
+     `db.auto_defesa_batalha_ativa`/`definir_auto_defesa_batalha`, mesmo
+     padrão INSERT...ON CONFLICT de outros toggles por jogador) - botão
+     novo "Auto-Defesa: Ligada/Desligada" no `ViewBatalhaHub` (sempre
+     visível, não só quando há desafio pendente). Os 3 pontos que já
+     resolviam contra bot (`_confirmar` do Desafiar, `_montar_defesa`,
+     Revanche) ganharam a MESMA condição extra: `alvo.bot or
+     db.auto_defesa_batalha_ativa(guild_id, alvo.id)` - resolve na hora
+     nos 2 casos, sem distinguir bot de humano com a opção ligada.
+  3. **Timeout de 10 minutos sem resposta** - `paineis.SchedulerBatalha`
+     (novo, `discord.ext.tasks.loop(seconds=30)`, mesmo padrão de
+     `SchedulerWorldBoss`: instanciado só no `on_ready` do papel
+     "completo", 1 tick de 30s varrendo TODOS os guilds do client) - a
+     cada tick, busca desafios `aguardando_defensor` com mais de
+     `LIMITE_MINUTOS_AUTO_DEFESA = 10` minutos (`db.
+     desafios_batalha_expirados`, já existia, só não tinha consumidor
+     desde que `cancelar_expirados` foi removido) e resolve cada um via
+     `defesa_automatica_para_desafio` -> `montar_defesa` ->
+     `resolver_rodadas` -> `concluir_batalha`, anunciando o resultado com
+     `canal.send` (não edita a mensagem original - ninguém está olhando
+     a interação depois de 10 minutos).
+- **`colecao_batalha_desafios.canal_id`** (coluna nova, migração
+  guardada) - o `SchedulerBatalha` precisa saber ONDE anunciar um desafio
+  que ninguém respondeu; guardado desde a criação (`iniciar_desafio`/
+  `iniciar_desafio_com_revanche`, `canal_id=None` opcional - `paineis.py`
+  sempre passa o canal real da interação).
+- **Efeito colateral do teste**: o desafio de teste esbarrou no desafio
+  #3 real (Aoi Asahina) ainda preso em `status='morte_subita'` - resolvido
+  manualmente antes de testar de verdade (ver CHANGELOG.md).
+- **Validado** contra uma cópia do `pandora.db` real: toggle liga/
+  desliga, criação de desafio com `canal_id` salvo corretamente,
+  `defesa_automatica_para_desafio` retornando o counter-pick certo pra
+  cada posição do desafiante (`['DPS','DPS','DPS','Tank','Tank']` ->
+  `['Tank','Tank','Support','Tank','Support']`, ordem embaralhada mas
+  cada posição vencendo a original), `montar_defesa`/`resolver_rodadas`/
+  `concluir_batalha` fim a fim fechando a batalha (`status='concluida'`).
+  **Não validado**: o `SchedulerBatalha` rodando de verdade por 10
+  minutos reais contra um desafio pendente (só as funções que ele chama
+  foram testadas direto, o loop de 30s em si nunca foi observado vencendo
+  o prazo ao vivo).
+
+## "🔍 Personagem" - navegação por posição global (2026-09-02)
+
+Pedido do usuário comparando com o Mudae: "consegue passar bem mais de 25
+profiles... quero passar de 25 e ter registro de posição qnd uso o
+comando p ver personagem... Além das setas de personagem anterior/
+próxima, adicione botões para pular diretamente para o bloco anterior ou
+seguinte de 25 posições. Também adicione um botão 🔎 Buscar que abra um
+modal do Discord permitindo informar o nome da personagem ou uma posição
+específica". Reescrita completa de `_ViewNivel` - a versão de 2026-09-01
+(`_candidatos` crescendo sob demanda, 25 em 25, nunca encolhendo) tinha um
+bug real (◀️▶️ travava exatamente no item 25, corrigido antes desta
+reescrita) e não dava pra pular DIRETO pra uma posição arbitrária sem
+passar por todas as intermediárias.
+
+- **Modelo novo**: a view guarda só `_indice_global` (posição 0-indexed),
+  `_total` (`db.contar_colecao_do_usuario`) e `_bloco` (até 25 personagens,
+  `db.colecao_do_usuario_paginada(guild_id, user_id, offset, 25)`) - o
+  bloco que CONTÉM a posição atual. Pular pra qualquer posição (2750,
+  50000...) é sempre 1 SELECT por `OFFSET`/`LIMIT`, nunca precisa carregar
+  a coleção inteira nem iterar posição por posição. `_ir_para(indice_
+  global)` é o núcleo ÚNICO de toda navegação (setas/bloco/busca/select) -
+  clampa contra o total, só troca de bloco (refaz o SELECT) quando a nova
+  posição realmente cai fora do bloco já carregado, e sempre recalcula
+  `_total` do zero (COUNT(*) barato) pra cobrir a coleção ter mudado de
+  tamanho (troca/claim/divórcio) desde a última navegação.
+- **Select "🔄 Trocar de personagem"** sempre reflete o BLOCO de 25 que
+  contém a posição atual (posições 1-25 -> bloco 1-25, 26-50 -> 26-50, 93
+  -> 76-100, 101 -> 101-125 - virada exata de bloco) - reconstruído
+  (`_atualizar_select_options`) toda vez que `_ir_para` troca de bloco,
+  com a posição absoluta no rótulo de cada opção ("2750. Nome") e a opção
+  atual marcada `default=True`.
+- **Navegação**: "◀️"/"▶️" (já existiam) andam 1 posição; "⏮️"/"⏭️" (novos)
+  pulam um bloco INTEIRO de 25, sempre pro INÍCIO do bloco vizinho (mesmo
+  padrão de página de `consulta.ViewColecao` - nunca desloca por 25 a
+  partir da posição atual, vira pro primeiro item da página vizinha).
+- **"🔎 Buscar"** (novo botão) abre `_ModalBuscarPosicaoOuNome` (1 campo) -
+  texto 100% dígito vira posição direta (`2750` abre a posição 2750);
+  qualquer outra coisa vira busca por NOME (`_posicao_por_nome`, usa
+  `consulta.buscar_por_nome` - MESMO algoritmo de sempre, substring
+  primeiro/similaridade depois - contra a coleção INTEIRA carregada via
+  `db.colecao_do_usuario_paginada(..., 0, 1_000_000)`, mesma ordem exata
+  da navegação por posição, crítico pra bater com onde as setas/blocos
+  realmente chegam) - fica só com o MELHOR resultado e abre direto nele,
+  sem lista intermediária pra escolher (diferente do "🔄 Trocar de
+  personagem", que continua mostrando as opções do bloco). Pular além do
+  total clampa pra última posição válida com um aviso inline, em vez de
+  travar.
+- **`_ModalBuscarPersonagem`** (Battle/Proteção, únicos callers restantes)
+  perdeu os parâmetros `paginacao_lazy`/`editar_mensagem_original` (só
+  "🔍 Personagem" os usava, e ele não usa mais este Modal - contrato de
+  lista fechada de candidatos não se encaixa em navegação por posição).
+- Validado contra uma cópia do banco real (conta com 4.764 personagens):
+  posição 93 -> bloco 76-100, posição 101 -> bloco 101-125, pulo de bloco
+  pro vizinho certo, pulo direto pra posição 2750, busca por nome
+  ("megumin") resolvendo pra posição certa, posição muito além do total
+  clampando pro fim com aviso. Nenhum clique real no Discord ainda desta
+  versão.
+
+## ⚠️ Nunca construir uma `discord.ui.View` dentro de `asyncio.to_thread` (achado 2026-09-02)
+
+Achado real em produção, achado DIFÍCIL - o usuário reportou "GAIA não
+respondeu a tempo" ao clicar em qualquer slot/"Comprar Slot" das Séries
+Favoritas; um 1º fix (bug real, `str` vs `int` no dono do painel) não
+resolveu; um log passo a passo (`[SERIES]`, mesmo padrão já usado na
+Batalha) provou que o clique NUNCA chegava no callback - só a abertura do
+painel logava, o clique em si não deixava rastro NENHUM, nem exceção.
+
+**Causa raiz**: `_ViewSeriesFavoritas.criar` (`pandora/paineis.py`) rodava
+`await asyncio.to_thread(_ViewSeriesFavoritas.criar, ...)` - construía a
+View INTEIRA (`__init__` -> `discord.ui.view.BaseView.__init__`) dentro da
+thread WORKER do `to_thread`, sem event loop rodando ali. `BaseView.
+__init__` tenta `asyncio.get_running_loop()` pra criar o `Future` interno
+`__stopped` (usado pelo `wait()`/timeout/dispatch da View); sem loop
+rodando, cai no `except RuntimeError` e deixa `__stopped = None` PRA
+SEMPRE (nunca mais corrigido depois, mesmo quando a View passa a ser
+usada de verdade na thread principal). `discord.ui.View._dispatch_item` -
+o método do PRÓPRIO discord.py que roteia TODO clique de botão/select pro
+callback certo - começa com:
+```python
+def _dispatch_item(self, item, interaction):
+    if self.__stopped is None or self.__stopped.done():
+        return None
+    ...
+```
+Com `__stopped=None`, isso devolve `None` IMEDIATAMENTE - o callback do
+item NUNCA é chamado, nenhuma exceção é levantada, nada é logado. Do
+ponto de vista de quem clicou, a interação simplesmente nunca é
+respondida ("app não respondeu") - sintoma IDÊNTICO a um timeout de 3s
+comum, mas a causa é estrutural, não de performance.
+
+**Prova** (reproduzida e depois validada corrigida, chamando o mecanismo
+REAL do discord.py direto, sem mock): `View._dispatch_item(item, fake_
+interaction)` devolvia `None` antes do fix; depois do fix, devolve uma
+`Task` de verdade que executa o callback até o fim.
+
+**Fix**: NUNCA construir o objeto View (nem chamar `__init__` de uma
+View, direto ou indireto) dentro de `asyncio.to_thread` - só o FETCH DE
+DADO caro pode rodar lá. Padrão certo (`_ViewSeriesFavoritas.criar`
+depois do fix):
+```python
+@classmethod
+async def criar(cls, guild_id, user_id):
+    dados = await asyncio.to_thread(fetch_caro, guild_id, user_id)  # thread OK
+    return cls(guild_id, user_id, dados)  # construção na THREAD PRINCIPAL
+
+def __init__(self, guild_id, user_id, dados):
+    super().__init__(timeout=300)  # BaseView.__init__ roda com loop de verdade
+    ...
+```
+Mesma regra vale pra RECONSTRUIR itens de uma View já existente
+(`_montar`/`_montar_botoes`, chamado de novo depois de uma mudança) -
+isso É seguro chamar direto (sem `to_thread`) de dentro de um callback de
+interação já rodando na thread principal, contanto que a View em si
+tenha sido CRIADA na thread principal originalmente; só a CRIAÇÃO
+(`__init__`) é sensível ao loop, não `add_item`/`clear_items` depois.
+
+**Auditoria feita**: `grep` por `asyncio.to_thread(.*View` e `to_thread(.*
+\.criar` em todo `pandora/*.py` - `_ViewSeriesFavoritas` era o ÚNICO
+lugar com esse padrão. Nenhum outro sistema afetado, mas vale MEMORIZAR
+essa regra pra qualquer código futuro que combine "buscar dado caro" +
+"construir View" numa função só.
+
+## Navegador de Série Favorita + teto de 25 slots (2026-09-03)
+
+Pedido do usuário: "quero colocar um dropdown na tela de series, com a
+lista de series q favoritei. E qnd seleciono uma serie, ele abre os
+personagens, igual na tela de personagens, soq com um botao de comprar
+tbm, q funcionaria da msm forma d como é na loja, seria so uma forma
+rapida", depois "Nos personagens das series favoritas, permita favoritar
+tbm. E aumente o limite de series para 25 se conseguir".
+
+- **`db.personagens_da_serie(guild_id, serie, permitir_nsfw)`** (nova) -
+  TODO personagem ATIVO do catálogo de uma série + `dono_id` (`None` se
+  livre nesse servidor, via `LEFT JOIN colecao_propriedade`).
+- **`_ViewNavegarSerie`** (nova, `pandora/paineis.py`) - até 25
+  personagens da série (ordenados por popularidade - "forma rápida", não
+  pagina séries enormes inteiras como o "🔍 Personagem" faz pra coleção
+  do usuário). Card = MESMO `consulta.embed_carta_personagem` de sempre +
+  campo "Status" com 3 estados (🛒 Disponível com preço/botão Comprar
+  habilitado, ✅ Já é sua com CP, 🔒 Possuída por outro jogador
+  mencionando quem) + "⭐ Favoritar/Desfavoritar" (só habilitado quando
+  `dono_id == autor` - favoritar é sobre a COLEÇÃO do jogador, `db.
+  favoritos_listar` exige posse). "🛒 Comprar" reaproveita `db.
+  comprar_personagem` (MESMA função da Loja de verdade, preço/corrida
+  idênticos) e atualiza o `dono_id` LOCAL na hora (sem isso o card
+  continuaria mostrando "Disponível" até reabrir, e o botão Favoritar
+  não liberaria no mesmo clique). `criar()` segue o MESMO padrão de
+  fábrica assíncrona de `_ViewSeriesFavoritas` (fetch caro em `to_thread`,
+  construção da View de volta na thread principal - ver seção acima).
+- **Entrada**: select "🎬 Navegar por uma Série Favorita..." novo no
+  painel "❤️ Séries Favoritas" (só aparece com pelo menos 1 slot
+  ocupado) - `value=str(indice)` (nunca o nome cru da série, mesmo motivo
+  do próximo item).
+- **Teto de slots 10 -> 25** (`db.NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_
+  FAVORITA` 5 -> 20, `PRECOS_UPGRADE_SLOT_SERIE_FAVORITA` estendido
+  continuando a curva de crescimento "primeiro palpite" já usada,
+  chegando a 16 bilhões de WiShards no 20º nível - deliberadamente quase
+  inatingível, mesmo espírito de todo teto máximo de upgrade) - **25 não
+  foi escolha arbitrária**: é o TETO REAL de opções de 1 único `discord.
+  ui.Select` do Discord. Isso forçou redesenhar `_ViewSeriesFavoritas`:
+  os slots eram 1 BOTÃO cada (`row=(slot-1)//5`) - 25 botões sozinhos
+  estourariam as 5 linhas x 5 itens do Discord, sem sobrar espaço nem
+  pro "Comprar slot" nem pro "Navegar". Viraram 1 SELECT só ("✏️
+  Escolher/trocar/limpar um slot...", `value=str(slot)`) - `_callback_
+  slot` (fábrica por item) virou `_callback_slot_select` (1 dispatcher
+  só, lê o slot escolhido do `interaction.data["values"]`).
+- Validado contra uma cópia do banco real: comprar os 20 upgrades chega
+  em exatamente 25 slots, o 21º é recusado; favoritar 25 séries reais e
+  montar o painel resulta em só 2 linhas de select (nenhum "Comprar
+  slot" quando já no teto), sem estourar limite nenhum do Discord;
+  comprar uma personagem livre no navegador libera o botão Favoritar no
+  mesmo clique, sem precisar reabrir; tentar favoritar uma não-possuída
+  recusa com mensagem clara.
+
+**Reescrita pra posição/bloco/busca (2026-09-03, "Faz o msm esquemas das
+personagens, o skip com 25, o dropdown com base na posição. E corrige o
+limite q hj é so 25")** - `_ViewNavegarSerie` tinha um teto FIXO de 25
+personagens por série (top-25 por popularidade, `personagens[:25]`, sem
+jeito de ver o resto - EXATAMENTE o mesmo bug já corrigido no "🔍
+Personagem" em 2026-09-02, só que reintroduzido aqui de propósito como
+"forma rápida"). Reescrita pra usar o MESMO modelo de `_ViewNivel`
+(posição global + bloco de 25 via `OFFSET`/`LIMIT`), trocando só a fonte
+de dado:
+- **`db.contar_personagens_da_serie(serie, permitir_nsfw)`** (nova) -
+  `COUNT(*)` puro sobre o catálogo da série.
+- **`db.personagens_da_serie_paginada(guild_id, serie, permitir_nsfw,
+  offset, limite=25)`** (nova) - MESMA query/ordem de `personagens_da_
+  serie` (popularidade DESC - crítico, é a ordem que numera a posição),
+  só com `LIMIT`/`OFFSET`.
+- **`_ModalBuscarPosicaoOuNomeSerie`** (nova) - MESMO contrato de
+  `_ModalBuscarPosicaoOuNome` (texto 100% dígito vira posição direta,
+  resto vira busca por nome via `consulta.buscar_por_nome` contra
+  `db.personagens_da_serie` inteira, MESMA ordem da paginação).
+- `_ViewNavegarSerie.__init__` ganhou `⏮️`/`⏭️` (pula bloco) e "🔎
+  Buscar" ao lado de `◀️`/`▶️` já existentes - row 0 (select) + row 1 (5
+  botões de navegação) + row 2 (Comprar/Comprar Tudo/Favoritar) + row 3
+  (Maximizar Nível/Afinidade) = 4 linhas, dentro do limite do Discord.
+- Validado contra uma cópia ISOLADA do banco real (Naruto, 166
+  personagens de catálogo): posição 93 -> bloco 76-100, posição 101 ->
+  bloco 101-125, pulo de bloco pro vizinho certo, busca por posição 120
+  e por nome "sasuke" resolvendo certo, posição além do total clampando
+  pro fim - mesma bateria de testes já usada pra validar `_ViewNivel`.
+
 ## Pendências
 
 - UI (`paineis.py`/`consulta.py`/`economia.py`) continua misturada com
