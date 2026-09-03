@@ -95,7 +95,7 @@ def embed_carta_personagem(personagem):
     foi reivindicada (`gacha._embed_confirmacao_claim`), disponíveis a
     qualquer momento depois (2026-08-30, pedido do usuário: "qnd eu coleto
     a personagem, mostra a raridade, classe e foto dela. Tem outra forma
-    de ver isso?" - botão "🔍 Ver" do hub `/waifu`)."""
+    de ver isso?" - botão "🔍 Personagem" do hub `/pandora`)."""
     embed = discord.Embed(title=personagem["nome"], color=_CORES_RARIDADE.get(personagem["raridade"], 0x2ECC71))
     embed.add_field(name="Raridade", value=_ESTRELAS.get(personagem["raridade"], "?"), inline=True)
     if personagem.get("classe"):
@@ -223,17 +223,34 @@ def formatar_wishlist(personagens):
         return "Sua wishlist tá vazia - use `/wishlist adicionar` com o `#id` de um personagem (ver `/personagem <nome>`)."
     total = len(personagens)
     personagens = personagens[:_LIMITE_TEXTO_WISHLIST]
-    sufixo = f" (mostrando as {_LIMITE_TEXTO_WISHLIST} de {total} - use o painel `/waifu` -> Wishlist pra ver todas)" if total > _LIMITE_TEXTO_WISHLIST else ""
+    sufixo = f" (mostrando as {_LIMITE_TEXTO_WISHLIST} de {total} - use o painel `/pandora` -> Wishlist pra ver todas)" if total > _LIMITE_TEXTO_WISHLIST else ""
     linhas = [f"{linha_personagem(p)} - `#{p['id']}`" for p in personagens]
     return _truncar_seguro(f"Sua wishlist{sufixo}:\n" + "\n".join(linhas))
 
 
-def formatar_ranking(guild, ranking):
+# 🔥 Título/unidade por métrica (2026-09-02, "rankings expandidos" -
+# Seção 25 do plano original) - `db.ranking_guild` devolve sempre
+# {"dono_id", "total"} pra QUALQUER métrica (`db.RANKINGS_DISPONIVEIS`
+# lista as chaves válidas), mas o TEXTO precisa dizer o que "total"
+# significa em cada uma (personagens/Soulmates/andar da Torre) - mapeado
+# aqui em vez de importar `db` (este módulo é formatação pura, sempre
+# recebeu os dados já prontos de quem chamou)."""
+_RANKINGS = {
+    "colecao": ("📚 Coleção", "personagens"),
+    "soulmates": ("💞 Soulmates", "Soulmates"),
+    "torre": ("🗼 Torre", "andar da Torre"),
+}
+
+
+def formatar_ranking(guild, ranking, metrica="colecao"):
     if not ranking:
-        return "Ninguém reivindicou nenhuma personagem nesse servidor ainda."
+        return "Ninguém tem essa métrica registrada nesse servidor ainda."
+    titulo, unidade = _RANKINGS.get(metrica, _RANKINGS["colecao"])
     linhas = []
     for posicao, linha in enumerate(ranking, start=1):
         membro = guild.get_member(int(linha["dono_id"])) if guild else None
         nome = membro.display_name if membro else f"<@{linha['dono_id']}>"
-        linhas.append(f"{posicao}. {nome} - {linha['total']} personagens")
-    return _truncar_seguro("**Ranking do servidor:**\n" + "\n".join(linhas))
+        linhas.append(f"{posicao}. {nome} - {linha['total']} {unidade}")
+    return _truncar_seguro(f"**{titulo} do servidor:**\n" + "\n".join(linhas))
+
+

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
-from pandora import db, gaia_webhook
+from pandora import cidade, db, gaia_webhook
 
 # 🔥 Cards individuais com reação pra reivindicar, estilo Mudae (2026-08-29,
 # pedido do usuário: "quero que cada personagem seja enviada em uma
@@ -117,6 +117,22 @@ _BONUS_ESCOLHA_CORRETA_PROVA_SOULMATE = 0.10
 # perto disponível (5 estrelas reaproveita o vermelho de 4, mas continua
 # visualmente distinto pelo emoji dourado + contagem de estrelas no rótulo).
 _EMOJI_RARIDADE = {1: "⚪", 2: "🟢", 3: "🔵", 4: "🟣", 5: "🟡"}
+# 🔥 1 reação A MAIS por card "livre" (2026-09-01, pedido do usuário:
+# "emoji para favoritar personagem qnd aparece no roll") - ⭐ SEMPRE
+# reivindica a personagem igual a reação colorida de sempre, só que
+# também favorita na hora. Fixo (não varia por raridade, ao contrário de
+# `_EMOJI_RARIDADE`) - nunca colide com ela porque nenhuma raridade usa ⭐
+# como emoji de claim.
+#
+# 🔥 Existia uma 2ª reação (🔄, claim + tag "trade") - REMOVIDA em
+# 2026-09-01 (achado do usuário: "essa reação de atualizar q vc pos nos
+# rolls é inutil" - 🔄 lia como "atualizar"/"recarregar", não como
+# "trocar", e cada reação a mais é mais 1 chamada de rede por personagem
+# no roll, ligado direto à queixa de velocidade de aparição). `TAG_TROCA`
+# continua existindo só porque o filtro "🏷️ Marcadas pra troca" em
+# Coleção (`paineis.py`) ainda mostra quem já foi marcado antes.
+EMOJI_FAVORITAR = "⭐"
+TAG_TROCA = "trade"
 _ESTILO_BOTAO_RARIDADE = {
     1: discord.ButtonStyle.secondary,
     2: discord.ButtonStyle.success,
@@ -248,7 +264,11 @@ def _limite_rolls_atual(guild_id, user_id, config=None):
     limite atual do usuario ex 13/50"), sem duplicar a conta em 2
     lugares."""
     config = config or db.obter_configuracao_colecao(guild_id)
-    return config["rolls_por_ciclo"] + db.nivel_upgrade_rolls(guild_id, user_id) * db.BONUS_ROLLS_POR_NIVEL
+    # 🔥 Roll Permanente (2026-09-01, drop raro do World Boss OU compra na
+    # Loja - contados SEPARADOS entre si, `db.bonus_permanente_total` soma
+    # os 2) - bônus SEPARADO do upgrade pago acima, mas soma junto.
+    bonus_rolls, _bonus_claims = db.bonus_permanente_total(guild_id, user_id)
+    return config["rolls_por_ciclo"] + db.nivel_upgrade_rolls(guild_id, user_id) * db.BONUS_ROLLS_POR_NIVEL + bonus_rolls
 
 
 def rolar_varios(guild_id, user_id, comando, quantidade=1):
@@ -281,6 +301,10 @@ def rolar_varios(guild_id, user_id, comando, quantidade=1):
         segundos = db.tempo_restante(guild_id, user_id, "rolls_restantes", "rolls_resetam_em", limite_rolls, config["ciclo_rolls_minutos"])
         minutos = max(1, segundos // 60)
         return False, f"Você já usou seus {limite_rolls} rolls desse ciclo - tenta de novo em ~{minutos} min."
+    # 🔥 Contador vitalício (2026-09-01, Conquistas do Colecionador,
+    # "col_rolls") - só rolls de JOGADOR de verdade (`rolar_sem_cooldown`,
+    # usado pelas contas de bot/NPC, nunca passa por aqui).
+    db.incrementar_rolls_realizados(guild_id, user_id, consumidos)
 
     generos = _GENEROS_POR_COMANDO[comando]
     # 🔥 Guaranteed Roll (loja, Seção 12) - consumo ÚNICO, vale só pra 1ª
@@ -354,17 +378,35 @@ def montar_embed(resultado):
     já chegam aqui com a recompensa resolvida, só falta mostrar."""
     tipo = resultado.get("resultado_tipo", "livre")
     if tipo in ("reencontro", "reencontro_soulmate", "reencontro_copia"):
-        embed = _embed_base(resultado)
+        # 🔥 Formato igual ao da confirmação de reivindicação (2026-09-01,
+        # pedido do usuário: "os rolls de personagens já coletados pode ser
+        # no formato das mensagens de reinvidicação, so marque o dono") -
+        # antes usava `_embed_base` (descrição/série/imagem GRANDE, igual um
+        # roll novo); agora é compacto (thumbnail + campos), igual
+        # `_embed_confirmacao_claim`, e marca o dono (`resultado["dono_id"]`
+        # já é o próprio jogador que rolou, ver `_resolver_resultado`) -
+        # antes o card não mencionava ninguém.
+        cor = _COR_SOULMATE if tipo != "reencontro" else _CORES_RARIDADE.get(resultado["raridade"], 0x2ECC71)
+        embed = discord.Embed(
+            description=f"🔁 <@{resultado['dono_id']}> reencontrou **{resultado['nome']}**!",
+            color=cor,
+        )
+        embed.add_field(name="Raridade", value=_ESTRELAS.get(resultado["raridade"], "?"), inline=True)
+        classe = resultado.get("classe_exibicao") or resultado.get("classe")
+        if classe:
+            categoria_combate = db.categoria_combate_da_classe(resultado.get("classe"))
+            sufixo = f" ({categoria_combate})" if categoria_combate else ""
+            embed.add_field(name="Classe", value=f"{classe}{sufixo}", inline=True)
+        if resultado.get("imagem_url"):
+            embed.set_thumbnail(url=resultado["imagem_url"])
         # 🔥 3 ramos do reencontro (2026-08-30, Soulstone/Afinidade -
         # substitui a "Prova de Soulmate" antiga como o jeito de virar
         # Soulmate) - cor exclusiva de Soulmate (cosmético, já existia)
         # aparece nos 2 ramos onde `is_soulmate` é True.
         if tipo == "reencontro_copia":
-            embed.color = _COR_SOULMATE
             nome_campo = "✨ Cópia da sua Soulmate!"
             valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{resultado['recompensa']} WiShards · +{resultado['soulstone_ganho']} Soulstone"
         elif tipo == "reencontro_soulmate":
-            embed.color = _COR_SOULMATE
             nome_campo = "💞 Virou sua Soulmate!"
             valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{resultado['recompensa']} WiShards"
         else:
@@ -373,9 +415,30 @@ def montar_embed(resultado):
         embed.add_field(name=nome_campo, value=valor_campo, inline=False)
         return embed
     if tipo == "terceiro":
-        embed = _embed_base(resultado)
+        # 🔥 Compacto, igual reencontro (2026-09-02, achado do usuário:
+        # "ele rolou um personagem q outra pessoa tem, e n mostrou o card
+        # resumido como o dos reinvidicado, como definimos antes") - o
+        # pedido original ("rolls de personagens JÁ COLETADOS") também
+        # cobria esse caso (já tem dono, só que de OUTRA pessoa), não só
+        # reencontro (já tem dono, da MESMA pessoa que rolou) - ficou pra
+        # trás na leva anterior, só reencontro foi reformatado. Mesmo
+        # `_embed_base` grande (descrição/série/imagem GRANDE) que um roll
+        # novo usava - agora thumbnail + campos, igual `_embed_confirmacao_
+        # claim`/reencontro.
+        embed = discord.Embed(
+            description=f"👀 <@{resultado['dono_id']}> já tem **{resultado['nome']}**!",
+            color=_CORES_RARIDADE.get(resultado["raridade"], 0x2ECC71),
+        )
+        embed.add_field(name="Raridade", value=_ESTRELAS.get(resultado["raridade"], "?"), inline=True)
+        classe = resultado.get("classe_exibicao") or resultado.get("classe")
+        if classe:
+            categoria_combate = db.categoria_combate_da_classe(resultado.get("classe"))
+            sufixo = f" ({categoria_combate})" if categoria_combate else ""
+            embed.add_field(name="Classe", value=f"{classe}{sufixo}", inline=True)
+        if resultado.get("imagem_url"):
+            embed.set_thumbnail(url=resultado["imagem_url"])
         embed.add_field(
-            name="Já tem dono",
+            name="🎁 Já tem dono",
             value=f"Pertence a <@{resultado['dono_id']}>, que ganhou {resultado['recompensa_dono']} WiShards.",
             inline=False,
         )
@@ -454,32 +517,41 @@ def _embed_confirmacao_claim(user, personagem, recompensa, novo_saldo, classe, c
     return embed
 
 
-async def _processar_claim(guild_id, personagem, user, ao_confirmar_economia=None):
-    """Núcleo do claim (checagem de cooldown + claim atômico + economia +
-    classe) - compartilhado entre o botão (`ViewClaimMultiplo`) e a reação
-    estilo Mudae (`processar_reacao_claim`), pra nunca duplicar essa lógica
-    entre os dois caminhos. `ao_confirmar_economia` (opcional, async) roda
-    logo depois do claim econômico confirmar (WiShards/Afinidade já
-    creditados), ANTES de esperar a classificação de classe - dá pro
-    chamador fazer o ack visual instantâneo (desabilitar botão, editar
-    mensagem) sem esperar a GAIA responder (~1-2s). Devolve (ok, erro_ou_
-    None, embed_ou_None)."""
+def _processar_claim_economia(guild_id, personagem, user):
+    """Núcleo ECONÔMICO do claim (checagem de cooldown + claim atômico +
+    WiShards/Afinidade/XP/marcos) - extraído de `_processar_claim`
+    (2026-09-02, achado do usuário: "pq a logica do reinvindicar tudo
+    demora? N da p otimizar?") - `gacha.reivindicar_em_massa` chama SÓ
+    isso pra cada personagem, sequencialmente (tem que ser em ordem, o
+    contador de claims é COMPARTILHADO entre elas), sem esperar
+    `revelar_classe` (que pode ser uma chamada de REDE pra GAIA classificar
+    - só acontece na 1ª reivindicação de uma personagem em QUALQUER
+    servidor) de cada uma antes de passar pra próxima. Devolve (ok,
+    erro_ou_None, recompensa_ou_None, novo_saldo_ou_None) - SÍNCRONA de
+    propósito (nenhuma chamada de rede aqui dentro), quem chama de dentro
+    de uma interação do Discord deve rodar em `asyncio.to_thread`."""
     config = db.obter_configuracao_colecao(guild_id)
     # 🔥 Upgrade permanente de claims (Seção 11, pago na loja, 2026-08-29 -
     # mesmo bônus PESSOAL somado em cima da config do SERVIDOR que já
     # existia pra rolls) - nunca substitui a config do servidor, só soma.
-    limite_claims = config["claims_por_ciclo"] + db.nivel_upgrade_claims(guild_id, user.id) * db.BONUS_CLAIMS_POR_NIVEL
+    # 🔥 Claim Permanente (2026-09-01, drop raro do World Boss OU compra na
+    # Loja - contados separados entre si, `db.bonus_permanente_total` soma
+    # os 2) - bônus SEPARADO do upgrade pago acima, soma junto.
+    _bonus_rolls, bonus_claims = db.bonus_permanente_total(guild_id, user.id)
+    limite_claims = (
+        config["claims_por_ciclo"] + db.nivel_upgrade_claims(guild_id, user.id) * db.BONUS_CLAIMS_POR_NIVEL + bonus_claims
+    )
     if db.claims_disponiveis(guild_id, user.id, limite_claims, config["ciclo_claims_minutos"]) <= 0:
         segundos = db.tempo_restante(
             guild_id, user.id, "claims_restantes", "claims_resetam_em",
             limite_claims, config["ciclo_claims_minutos"],
         )
         minutos = max(1, segundos // 60)
-        return False, f"Você já usou seu claim desse ciclo - tenta de novo em ~{minutos} min.", None
+        return False, f"Você já usou seu claim desse ciclo - tenta de novo em ~{minutos} min.", None, None
 
     venceu = db.reivindicar(guild_id, personagem["id"], user.id)
     if not venceu:
-        return False, "Alguém foi mais rápido - essa personagem já tem dono.", None
+        return False, "Alguém foi mais rápido - essa personagem já tem dono.", None, None
 
     db.consumir_claim(guild_id, user.id, limite_claims, config["ciclo_claims_minutos"])
     # 🔥 WiShards do claim inicial + Afinidade nasce em 1 (ERIS_sistema_
@@ -494,6 +566,35 @@ async def _processar_claim(guild_id, personagem, user, ao_confirmar_economia=Non
     # (Seção 11) - checados JUNTO do claim, nunca em lote separado.
     db.creditar_xp_progressao(guild_id, user.id, personagem["raridade"] * 15)
     db.checar_marcos_colecao(guild_id, user.id)
+    # 🔥 REMOVIDO (2026-09-01, achado do usuário: "os botões de claim,
+    # tanto por botão qnt emoji, estão parando de responder ou demorando")
+    # - `cidade.atualizar_snapshot_bonus` foi adicionado aqui na leva
+    # anterior pra manter o bônus da Cidade sempre em dia, mas ele escaneia
+    # a COLEÇÃO INTEIRA (`_workforce_por_funcao`) - rodar isso em TODO
+    # claim (o caminho mais quente do jogo, muito mais frequente que Party/
+    # Nível/Afinidade) trava a resposta do próprio claim pra quem tem
+    # coleção grande (usuário citou "mesmo q tenha mais de 10k"). O bônus
+    # da Cidade continua atualizando via Party/Upar Nível/Aumentar
+    # Afinidade/Divorciar/Merge (`cidade.atualizar_snapshot_bonus` ainda
+    # chamado nesses pontos, bem mais raros que um claim) - uma personagem
+    # recém-reivindicada só entra no cálculo na PRÓXIMA dessas ações ou na
+    # próxima visita à Cidade, atraso aceitável trocado por claim
+    # instantâneo de novo.
+    return True, None, recompensa, novo_saldo
+
+
+async def _processar_claim(guild_id, personagem, user, ao_confirmar_economia=None):
+    """Núcleo do claim (economia + classe) - compartilhado entre o botão
+    (`ViewClaimMultiplo`) e a reação estilo Mudae (`processar_reacao_
+    claim`), pra nunca duplicar essa lógica entre os dois caminhos.
+    `ao_confirmar_economia` (opcional, async) roda logo depois do claim
+    econômico confirmar (WiShards/Afinidade já creditados), ANTES de
+    esperar a classificação de classe - dá pro chamador fazer o ack visual
+    instantâneo (desabilitar botão, editar mensagem) sem esperar a GAIA
+    responder (~1-2s). Devolve (ok, erro_ou_None, embed_ou_None)."""
+    ok, erro, recompensa, novo_saldo = _processar_claim_economia(guild_id, personagem, user)
+    if not ok:
+        return False, erro, None
 
     if ao_confirmar_economia is not None:
         await ao_confirmar_economia()
@@ -547,6 +648,23 @@ async def atribuir_personagem_admin(guild_id, personagem_id, user):
     if db.dono_do_personagem(guild_id, personagem_id) is not None:
         return False, "Essa personagem já tem dono nesse servidor.", None
     return await _claim_sem_cooldown(guild_id, personagem_id, user, "admin_atribuicao")
+
+
+async def comprar_com_revelacao(guild_id, personagem_id, user):
+    """Envelope de `db.comprar_personagem` que TAMBÉM revela classe
+    (2026-09-03, pedido do usuário: "lembrando q esses botoes tem q fazer
+    exatamente o claim, definir clsse e tudo") - sozinho, `db.
+    comprar_personagem` nunca chamava `revelar_classe` (mesmo gap já
+    achado no Merge antes, nunca corrigido pra Loja/navegador de série)
+    - uma personagem NUNCA reivindicada em NENHUM servidor podia sair
+    comprada sem classe pra sempre. Devolve `(ok, mensagem)` - MESMO
+    formato de `db.comprar_personagem`, quem chama não precisa saber que
+    teve um passo a mais."""
+    ok, mensagem = await asyncio.to_thread(db.comprar_personagem, guild_id, user.id, personagem_id)
+    if ok:
+        personagem = await asyncio.to_thread(db.personagem_por_id, personagem_id)
+        await revelar_classe(personagem)
+    return ok, mensagem
 
 
 def regra_prova_soulmate(raridade):
@@ -715,14 +833,31 @@ async def enviar_cards_individuais(canal, guild_id, resultados, indice_inicial=0
             continue
         if resultado.get("resultado_tipo", "livre") != "livre":
             continue
-        emoji = _EMOJI_RARIDADE.get(resultado.get("raridade", 1), "💘")
-        try:
-            await mensagem.add_reaction(emoji)
-        except discord.HTTPException:
-            continue
-        await asyncio.to_thread(
-            db.registrar_card_pendente, guild_id, mensagem.id, resultado["id"], emoji, expira_em.isoformat(),
+        emoji_claim = _EMOJI_RARIDADE.get(resultado.get("raridade", 1), "💘")
+        # 🔥 2 reações por card (2026-09-01) - a colorida de sempre (claim
+        # normal) e ⭐ (claim + favoritar na hora). A 3ª (🔄, claim + tag
+        # "trade") foi REMOVIDA no mesmo dia (achado do usuário: "essa
+        # reação de atualizar q vc pos nos rolls é inutil" - o emoji 🔄
+        # lia como "atualizar", não como "trocar", e cada reação a mais é
+        # mais 1 chamada de rede por personagem, direto ligado à queixa
+        # "tem como melhorar a velocidade de aparição das personagens?").
+        # As 2 que sobraram são adicionadas em PARALELO (`asyncio.gather`,
+        # não uma sequência de `await`) - metade do tempo de rede por
+        # card; o registro dos 2 cards pendentes vira 1 chamada só
+        # (`registrar_cards_pendentes`, 1 conexão/transação em vez de 2).
+        resultados_reacao = await asyncio.gather(
+            mensagem.add_reaction(emoji_claim), mensagem.add_reaction(EMOJI_FAVORITAR), return_exceptions=True,
         )
+        itens_pendentes = [
+            (emoji, acao) for emoji, acao, resultado_reacao in (
+                (emoji_claim, "claim", resultados_reacao[0]), (EMOJI_FAVORITAR, "favoritar", resultados_reacao[1]),
+            )
+            if not isinstance(resultado_reacao, Exception)
+        ]
+        if itens_pendentes:
+            await asyncio.to_thread(
+                db.registrar_cards_pendentes, guild_id, mensagem.id, resultado["id"], itens_pendentes, expira_em.isoformat(),
+            )
 
 
 async def enviar_resultados_em_lotes(canal, guild_id, resultados, total_ciclo, enviar_primeira_mensagem=None):
@@ -782,7 +917,7 @@ async def enviar_resultados(interaction, resultados):
     canal de musica definido, independente se mandar o comando em outro
     canal... o msm p os colecionar") - se `/colecao_admin canal` tiver
     configurado um canal pra esse servidor, os cards/botões saem SEMPRE
-    lá, nunca no canal de onde `/wa`/`/ha`/`/ma`/`/waifu` foi digitado; a
+    lá, nunca no canal de onde `/wa`/`/ha`/`/ma`/`/pandora` foi digitado; a
     interação em si só recebe um ack ephemeral (apagado em seguida) nesse
     caso - mesma limitação de sempre, não dá pra fazer uma resposta de
     interação aparecer num canal diferente de onde ela nasceu."""
@@ -829,8 +964,13 @@ async def processar_reacao_claim(client, payload):
     `expira_em` aqui manualmente como antes."""
     if payload.user_id == client.user.id:
         return
-    pendente = await asyncio.to_thread(db.card_pendente_por_mensagem, payload.message_id)
-    if pendente is None or str(payload.emoji) != pendente["emoji"]:
+    # 🔥 Busca já FILTRADA pelo emoji exato (2026-09-01) - antes buscava só
+    # por `message_id` e comparava o emoji manualmente aqui; agora cada
+    # emoji da mesma mensagem é uma linha própria (claim/favoritar/trocar,
+    # ver `db.registrar_card_pendente`), então `None` já cobre "reação
+    # aleatória que não é nenhum dos 3 válidos" igual antes.
+    pendente = await asyncio.to_thread(db.card_pendente_por_mensagem, payload.message_id, str(payload.emoji))
+    if pendente is None:
         return
     personagem = await asyncio.to_thread(db.personagem_por_id, pendente["personagem_id"])
     if personagem is None:
@@ -859,6 +999,18 @@ async def processar_reacao_claim(client, payload):
         return
 
     await asyncio.to_thread(db.remover_card_pendente, payload.message_id)
+    # 🔥 Ação extra da reação (2026-09-01) - "favoritar" (ver `EMOJI_
+    # FAVORITAR`) só se aplica DEPOIS do claim confirmar de verdade (nunca
+    # antes - só faz sentido favoritar uma personagem que já é sua);
+    # "claim" (a reação colorida de sempre) não faz nada extra aqui. A
+    # ação "trocar" (🔄, tag "trade") foi REMOVIDA no mesmo dia (achado do
+    # usuário: "essa reação de atualizar q vc pos nos rolls é inutil") -
+    # `db.definir_tag`/`TAG_TROCA`/o filtro "🏷️ Marcadas pra troca" em
+    # Coleção continuam existindo (ainda mostram o que já foi marcado
+    # antes), só não tem mais um jeito NOVO de marcar via reação de roll.
+    if pendente["acao"] == "favoritar":
+        await asyncio.to_thread(db.favoritar, pendente["guild_id"], membro.id, personagem["id"])
+        embed.add_field(name="⭐ Favoritada!", value="Já marcada como favorita.", inline=False)
     if canal is not None:
         try:
             await canal.send(embed=embed)
@@ -988,7 +1140,7 @@ def personagens_pendentes(guild_id, raridade=None, limite=None):
     rolando 50/hora cada), sem bater com o pedido original. `limite`
     (opcional) corta o resultado aos N primeiros DEPOIS de ordenar -
     `/colecao_disponiveis` usa `limite=10` ("os 10 melhores"); o painel
-    `/waifu` -> Coleção -> Disponíveis continua sem limite, pra poder
+    `/pandora` -> Coleção -> Disponíveis continua sem limite, pra poder
     paginar por cima de tudo que sobrar. `raridade` (opcional) filtra pra
     só esse tier ANTES de aplicar `limite`.
 
@@ -1004,6 +1156,48 @@ def personagens_pendentes(guild_id, raridade=None, limite=None):
     if limite is not None:
         pendentes = pendentes[:limite]
     return pendentes
+
+
+async def reivindicar_em_massa(guild_id, user):
+    """🔥 Novo (2026-09-01, pedido do usuário: "quero um botão que gasta
+    todos os meus claims p pegar as personagens disponiveis por ordem de
+    popularidade") - reivindica, uma atrás da outra, as personagens ainda
+    pendentes nesse servidor (`personagens_pendentes`, já vem ordenado por
+    POPULARIDADE DESC) até os claims desse ciclo acabarem de vez ou a
+    lista de pendentes se esgotar. Perder a corrida pra outro clique não
+    consome claim nenhum (mesma regra de sempre), só pula pra próxima
+    pendente da lista; a única forma de PARAR de verdade é os claims
+    acabarem. Devolve [(personagem, recompensa_wishards), ...] das
+    reivindicadas com sucesso, na ordem em que foram conquistadas.
+
+    🔥 Otimizado (2026-09-02, achado do usuário: "pq a logica do
+    reinvindicar tudo demora? N da p otimizar?") - usa `_processar_claim_
+    economia` (só a parte rápida, sem rede) em vez de `_processar_claim`
+    completo PRA CADA personagem - a parte cara (`revelar_classe`, que faz
+    uma chamada de REDE pra GAIA classificar quando é a 1ª vez que ESSA
+    personagem é reivindicada em QUALQUER servidor) deixou de rodar uma
+    atrás da outra dentro do loop (N personagens nunca-antes-classificadas
+    = N chamadas de rede EM SÉRIE, cada uma ~1-2s) - agora só dispara
+    DEPOIS que todos os claims econômicos já terminaram, todas de uma vez
+    em PARALELO (`asyncio.gather`). O contador de claims em si continua
+    sendo consumido em ordem estrita (é compartilhado entre as
+    personagens, não dá pra paralelizar essa parte sem risco de
+    corrida/gastar claim a mais)."""
+    pendentes = await asyncio.to_thread(personagens_pendentes, guild_id)
+    conquistadas = []
+    para_revelar_classe = []
+    for message_id, personagem in pendentes:
+        ok, erro, recompensa, _novo_saldo = await asyncio.to_thread(_processar_claim_economia, guild_id, personagem, user)
+        if not ok:
+            if "já usou seu claim" in erro:
+                break
+            continue
+        await asyncio.to_thread(db.remover_card_pendente, message_id)
+        conquistadas.append((personagem, recompensa))
+        para_revelar_classe.append(personagem)
+    if para_revelar_classe:
+        await asyncio.gather(*(revelar_classe(personagem) for personagem in para_revelar_classe))
+    return conquistadas
 
 
 class ViewClaimPendentes(discord.ui.View):

@@ -28,7 +28,7 @@ pro CP de cada trabalhador - `db.py` não pode importar `torre` (`torre.py`
 já importa `db.py`, viraria ciclo)."""
 from datetime import datetime, timezone
 
-from pandora import db, torre
+from pandora import db, itens, torre
 
 # 🔥 Taxonomia FECHADA v2 (2026-08-30) - "Produção"/"Serviço" SAÍRAM,
 # "Arcano" ENTROU (absorveu o que era místico/oculto de Cultura/Serviço -
@@ -74,10 +74,15 @@ PESO_PERSONAGEM_POR_PODER = 50
 # de Arcano/Administração combinados, quase quadruplicando a Party. Essas
 # 3 taxas (não a `TAXA_BONUS_COLECAO`, que é literal do usuário) foram
 # cortadas ~20-50x pra virar um SUPLEMENTO modesto, não o fator dominante.
+# 🔥 Recalibrado 2026-09-01 (pedido do usuário: "produção de soulstone na
+# cidade esta muito alto, pode cortar para 1/3, e o comercio pode
+# duplicar") - só essas 2 taxas, ajuste manual em cima da recalibração de
+# 2026-08-30 acima (mesmo padrão da correção anterior de `TAXA_MILITAR_
+# PARA_CP_FIXO`, um valor por vez, sem reabrir as outras 4).
 TAXA_BONUS_COLECAO = 0.01
-TAXA_SOULSTONE_POR_CP_HORA = 0.001
+TAXA_SOULSTONE_POR_CP_HORA = 0.001 / 3
 TAXA_XP_POR_CP_HORA = 0.005
-TAXA_WISHARDS_POR_CP_HORA = 0.01
+TAXA_WISHARDS_POR_CP_HORA = 0.01 * 2
 # 🔥 TAXA_MILITAR_PARA_CP_FIXO subida de 0,0005 pra 0,01 (2026-08-30,
 # pedido direto do usuário: "troca o 0,0005 do militar por 0.01") - ajuste
 # manual em cima da recalibração acima, só pra esta taxa.
@@ -97,19 +102,43 @@ def _workforce_por_funcao(guild_id, user_id):
     Party - usado só pelo "Bônus da Coleção", que não é ligado a nenhuma
     função específica). `por_funcao` ({funcao: {"qtd", "cp"}}) só conta
     quem NÃO está na Party (mesmo critério de sempre - "personagens fora
-    da Party trabalham") e já tem `classe` revelada."""
+    da Party trabalham") e já tem `classe` revelada.
+
+    🔥 `torre._contexto_lote` (2026-09-01, achado do usuário: "Quando fui
+    upar level apenas de 1 personagem para o maximo, gaia nao respondeu a
+    tempo") - antes chamava `torre.power_personagem` SEM `nivel`/
+    `bonus_global`/`cache_bonus_classe`, então CADA personagem da coleção
+    abria suas PRÓPRIAS conexões SQLite novas (nível + bônus global +
+    bônus de classe) - pra uma coleção de milhares, isso é o MESMO N+1 já
+    corrigido no Auto-Party há tempo, só que nunca tinha sido aplicado
+    aqui. `atualizar_snapshot_bonus` (chamado depois de Upar Nível/
+    Afinidade/Divorciar/Merge/Party) passa por esta função - o N+1 tornava
+    QUALQUER uma dessas ações lenta pra coleção grande."""
     equipe_party = db.obter_equipe(guild_id, user_id, "party")
     ids_na_party = {p["id"] for p in equipe_party.values()}
     colecao = db.colecao_do_usuario(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series = torre._contexto_lote(guild_id, user_id)
 
     cp_total_colecao = 0.0
     por_funcao = {}
     for personagem in colecao:
-        power, _nivel, _categoria = torre.power_personagem(personagem, guild_id, user_id)
+        nivel = niveis.get(personagem["id"], 1)
+        power, _nivel, _categoria = torre.power_personagem(
+            personagem, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
+            bonus_series=bonus_series,
+        )
         cp_total_colecao += power
         if personagem["id"] in ids_na_party:
             continue
-        funcao = db.funcao_cidade_da_classe(personagem.get("classe"))
+        # 🔥 Lê do MESMO cache de `torre._contexto_lote` (2026-09-01,
+        # achado do usuário: "upar level de 1 personagem pro maximo...
+        # gaia nao respondeu a tempo") - antes chamava `db.funcao_cidade_
+        # da_classe` por PERSONAGEM (não só por classe distinta), abrindo
+        # 1 conexão SQLite nova por item da coleção inteira; `cache_
+        # classe[classe]` já foi populado com `(bonus_cp, categoria,
+        # funcao_cidade)` numa única query (`db.info_classes_em_lote`).
+        classe = personagem.get("classe")
+        _bonus_cp, _categoria, funcao = cache_classe.get(classe, (0, None, None))
         if funcao is None:
             continue
         entrada = por_funcao.setdefault(funcao, {"qtd": 0, "cp": 0.0})
@@ -118,10 +147,18 @@ def _workforce_por_funcao(guild_id, user_id):
     return cp_total_colecao, por_funcao
 
 
-def _poder_area(dados):
+def _poder_area(dados, multiplicador_construcao=1.0):
     """`Poder da Área` (Seção "Regra de cálculo", pedido do usuário) -
-    combina quantidade E CP, nunca só um dos dois."""
-    return dados["cp"] * PESO_CP_POR_PODER + dados["qtd"] * PESO_PERSONAGEM_POR_PODER
+    combina quantidade E CP, nunca só um dos dois. `multiplicador_
+    construcao` (2026-09-01, item 🏗️ Upgrade de Construção - "melhora
+    permanentemente o efeito daquela área") - 1.0 sem nenhum nível
+    investido, `1 + 0.10×nível` por jogador/área."""
+    return (dados["cp"] * PESO_CP_POR_PODER + dados["qtd"] * PESO_PERSONAGEM_POR_PODER) * multiplicador_construcao
+
+
+def _multiplicador_construcao(guild_id, user_id, funcao):
+    nivel = db.nivel_construcao(guild_id, user_id, funcao)
+    return 1.0 + itens.BONUS_POR_NIVEL_CONSTRUCAO * nivel
 
 
 def coletar_producao_pendente(guild_id, user_id):
@@ -150,7 +187,9 @@ def coletar_producao_pendente(guild_id, user_id):
 
     def _poder(funcao):
         dados = por_funcao.get(funcao)
-        return _poder_area(dados) if dados else 0.0
+        if not dados:
+            return 0.0
+        return _poder_area(dados, _multiplicador_construcao(guild_id, user_id, funcao))
 
     # 🔥 Administração multiplica as OUTRAS 5 áreas (nunca o Bônus da
     # Coleção, que é um mecanismo à parte, sempre 1% fixo).
@@ -192,3 +231,32 @@ def coletar_producao_pendente(guild_id, user_id):
             "Administração": bonus_admin, "Comércio": taxa_wishards_hora, "Arcano": bonus_arcano_percentual,
         },
     }
+
+
+def atualizar_snapshot_bonus(guild_id, user_id):
+    """Recalcula e grava SÓ o snapshot de bônus de CP (Militar/Arcano/
+    Administração/Bônus da Coleção), sem tocar no relógio de produção
+    acumulada (Saúde/Cultura/Comércio) nem no que já foi creditado -
+    (2026-09-01, achado do usuário: "os bônus da cidade parece que só são
+    recarregados depois que clica em cidade"). Chamado depois de qualquer
+    ação que muda quem trabalha ou o CP de alguém (Party, Upar Nível,
+    Aumentar Afinidade, Divorciar, Merge, Auto-Party) - assim o bônus de CP
+    da Party reflete a mudança na hora, sem precisar visitar o painel
+    "🏙️ Cidade" de novo. Não faz nada se a Cidade nunca foi visitada ainda
+    (sem timestamp pra preservar) - a 1ª visita já calcula tudo do zero."""
+    ultima = db.cidade_ultima_producao(guild_id, user_id)
+    if ultima is None:
+        return
+    cp_total_colecao, por_funcao = _workforce_por_funcao(guild_id, user_id)
+
+    def _poder(funcao):
+        dados = por_funcao.get(funcao)
+        if not dados:
+            return 0.0
+        return _poder_area(dados, _multiplicador_construcao(guild_id, user_id, funcao))
+
+    bonus_admin = _poder("Administração") * TAXA_ADMINISTRACAO_PARA_PERCENTUAL
+    bonus_militar_fixo = _poder("Militar") * TAXA_MILITAR_PARA_CP_FIXO * (1 + bonus_admin)
+    bonus_arcano_percentual = _poder("Arcano") * TAXA_ARCANO_PARA_PERCENTUAL * (1 + bonus_admin)
+    bonus_colecao_fixo = cp_total_colecao * TAXA_BONUS_COLECAO
+    db.definir_cidade_ultima_producao(guild_id, user_id, ultima, bonus_militar_fixo, bonus_arcano_percentual, bonus_colecao_fixo)

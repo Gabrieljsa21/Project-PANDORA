@@ -9,8 +9,6 @@ roll.
 deliberada pra escala pessoal, diferente do que o plano original sugeria) -
 `validar_proposta` é chamada tanto ao criar quanto ao aceitar, nunca
 confiando no que a proposta dizia na hora de criar."""
-import random
-
 import discord
 
 from pandora import db
@@ -27,7 +25,13 @@ _ESTRELAS = {1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "⭐⭐⭐⭐", 5: "⭐�
 LIMIAR_TROCA_NPC = 10
 
 
-def _valor_personagens(personagem_ids):
+def valor_loja_personagens(personagem_ids):
+    """Soma `db.valor_base_wishards` (o preço que cada uma custaria se
+    fosse comprada na Loja agora) das personagens dadas - mesmo número
+    usado como "valor" de uma personagem em toda regra econômica do
+    Colecionador (claim/reencontro/troca com NPC). Pública (2026-09-02,
+    pedido do usuário: mostrar esse valor na UI de Trocar antes de digitar
+    quanto pagar) - era `_valor_personagens`, só usada aqui dentro."""
     total = 0
     for pid in personagem_ids:
         p = db.personagem_por_id(pid)
@@ -41,8 +45,8 @@ def avaliar_proposta_npc(proposta):
     WiShards que a NPC está sendo pedida a dar - mesmo número usado em todo
     lugar como "valor" de uma personagem (recompensa de claim/reencontro).
     Devolve (aceita: bool, motivo: str)."""
-    custo = proposta["pede_wishards"] + _valor_personagens(proposta["pede_personagens"])
-    oferecido = proposta["oferece_wishards"] + _valor_personagens(proposta["oferece_personagens"])
+    custo = proposta["pede_wishards"] + valor_loja_personagens(proposta["pede_personagens"])
+    oferecido = proposta["oferece_wishards"] + valor_loja_personagens(proposta["oferece_personagens"])
     limiar = custo * LIMIAR_TROCA_NPC
     if oferecido >= limiar:
         return True, f"{oferecido} de valor recebido (≥ {limiar}, 10x o que estava dando)."
@@ -159,65 +163,100 @@ class ViewTroca(discord.ui.View):
         await interaction.response.edit_message(content="❌ Troca recusada.", view=self)
 
 
-def executar_merge(guild_id, user_id, ids, confirmar=False):
-    """Núcleo de `/merge` (Seção 14) - extraído de `eris/bot.py::_merge`
-    (2026-08-29) pra ser compartilhado com o painel `👤 Perfil` (`eris/
-    colecao/paineis.py`), sem duplicar as regras. Devolve (ok: bool,
-    mensagem: str, precisa_confirmar: bool) - `precisa_confirmar` só é True
-    no caso específico de Afinidade > 1 sem `confirmar=True` (os outros
-    erros são definitivos, não sanáveis com confirmação); quem chama decide
-    como pedir essa confirmação (o comando de barra pede `confirmar:true`
-    no parâmetro, o painel mostra botões Sim/Não)."""
+def validar_merge(guild_id, user_id, ids, confirmar=False):
+    """1ª etapa do Merge (2026-09-02, pedido do usuário: "ele vai deixar
+    trocar 5 da msm raridade por 1 da msm raridade disponivel, a escolha"
+    - deixou de subir sorteado pra raridade seguinte, virou escolha do
+    jogador DENTRO da mesma raridade) - só valida as 5 personagens a
+    sacrificar, SEM escolher/reivindicar nada ainda (quem chama mostra a
+    lista de disponíveis pro jogador escolher, depois chama `executar_
+    merge` com a escolha). Devolve (ok, mensagem_ou_None, raridade_ou_None,
+    precisa_confirmar) - `precisa_confirmar` só é True no caso específico
+    de Afinidade > 1 sem `confirmar=True` (os outros erros são
+    definitivos); quem chama decide como pedir essa confirmação."""
     if len(set(ids)) != 5:
-        return False, "As 5 personagens precisam ser diferentes entre si.", False
+        return False, "As 5 personagens precisam ser diferentes entre si.", None, False
     personagens = {i: db.personagem_por_id(i) for i in ids}
     faltando = [i for i, p in personagens.items() if p is None]
     if faltando:
-        return False, f"Esse #id não existe no catálogo: {faltando[0]}.", False
+        return False, f"Esse #id não existe no catálogo: {faltando[0]}.", None, False
     for i in ids:
         if db.dono_do_personagem(guild_id, i) != str(user_id):
-            return False, f"Você não tem a personagem #{i} nesse servidor.", False
+            return False, f"Você não tem a personagem #{i} nesse servidor.", None, False
 
     # 🔥 Bloqueio DURO pra Party, sem opção de confirmar (Seção 15: "nunca
     # selecionar... Party" - diferente de favorita/Afinidade alta, que só
     # pedem confirmação, a Party nem deixa passar).
     na_party = [i for i in ids if db.esta_na_party(guild_id, user_id, i)]
     if na_party:
-        return False, f"A personagem #{na_party[0]} está na sua Party - tire ela de lá antes de sacrificar.", False
+        return False, f"A personagem #{na_party[0]} está na sua Party - tire ela de lá antes de sacrificar.", None, False
 
     raridade = personagens[ids[0]]["raridade"]
     if any(p["raridade"] != raridade for p in personagens.values()):
-        return False, "As 5 personagens precisam ser da MESMA raridade.", False
-    if raridade >= 5:
-        return False, "Personagens 5⭐ não têm pra onde subir.", False
+        return False, "As 5 personagens precisam ser da MESMA raridade.", None, False
 
     afinidades = [db.afinidade(guild_id, user_id, i) for i in ids]
     if any(a > 1 for a in afinidades) and not confirmar:
-        return False, "Pelo menos uma dessas personagens tem vínculo (Afinidade > 1).", True
+        return False, "Pelo menos uma dessas personagens tem vínculo (Afinidade > 1).", raridade, True
 
-    permitir_nsfw = db.obter_configuracao_colecao(guild_id)["nsfw_permitido"]
-    candidatos = db.candidatos_por_raridade(guild_id, raridade + 1, None, permitir_nsfw)
-    random.shuffle(candidatos)
-    novo_id = next((cid for cid in candidatos if db.dono_do_personagem(guild_id, cid) is None), None)
-    if novo_id is None:
-        return False, "Não sobrou nenhuma personagem livre dessa raridade seguinte agora - tenta de novo daqui a pouco.", False
+    return True, None, raridade, False
+
+
+def executar_merge(guild_id, user_id, ids, escolha_id):
+    """2ª etapa do Merge - o jogador JÁ escolheu (`escolha_id`) qual
+    personagem DISPONÍVEL da MESMA raridade quer receber (`validar_merge`
+    já rodou antes, é quem chama que garante isso). REVALIDA TUDO de novo
+    aqui, incluindo Party (2026-09-02, pedido do usuário: "N permita fazer
+    merge de personagens no grupo" - `validar_merge` já bloqueava isso na
+    1ª etapa, mas o jogador pode adicionar uma das 5 à Party DEPOIS de
+    validar e ANTES de escolher quem recebe, nessa janela entre as 2
+    etapas) - devolve (ok: bool, mensagem: str).
+
+    🔥 Ordem das ações (2026-09-02, correção do usuário: "Não pode de
+    forma alguma deixar 2 jogadores terem a msm personagem... só de fato
+    realizar todas as ações após o claim") - `db.reivindicar` (INSERT
+    atômico, `ON CONFLICT DO NOTHING`) roda PRIMEIRO e é o único ponto que
+    decide se o Merge acontece; as 5 sacrificadas só são removidas DEPOIS
+    dele confirmar sucesso. A versão anterior fazia o oposto (removia as 5
+    ANTES de reivindicar, sem checar o resultado) - se a escolhida fosse
+    reivindicada por outra pessoa bem no meio disso, o jogador perdia as 5
+    personagens sem receber nada em troca."""
+    personagens = {i: db.personagem_por_id(i) for i in ids}
+    if any(p is None for p in personagens.values()) or any(db.dono_do_personagem(guild_id, i) != str(user_id) for i in ids):
+        return False, "Uma das personagens sacrificadas não é mais sua - Merge cancelado."
+    raridade = personagens[ids[0]]["raridade"]
+    if any(p["raridade"] != raridade for p in personagens.values()):
+        return False, "As 5 personagens precisam ser da MESMA raridade - Merge cancelado."
+    na_party = [i for i in ids if db.esta_na_party(guild_id, user_id, i)]
+    if na_party:
+        return False, f"A personagem #{na_party[0]} entrou na sua Party nesse meio-tempo - tire ela de lá e tente de novo."
+    escolhida = db.personagem_por_id(escolha_id)
+    if escolhida is None or escolhida["raridade"] != raridade:
+        return False, "Personagem escolhida inválida - Merge cancelado."
+
+    if not db.reivindicar(guild_id, escolha_id, user_id):
+        return False, "Essa personagem já foi reivindicada por outra pessoa nesse meio-tempo - escolha outra."
 
     for i in ids:
         db.remover_propriedade_sem_pagamento(guild_id, i, user_id)
-    db.reivindicar(guild_id, novo_id, user_id)
-    db.definir_afinidade_inicial(guild_id, user_id, novo_id)
+    db.definir_afinidade_inicial(guild_id, user_id, escolha_id)
     # 🔥 XP de Progressão (2026-08-30, análise do usuário Seção 4:
     # "desenvolver personagens" inclui o Merge) - baseado na raridade das
-    # 5 sacrificadas, não na nova (ela já ganha via claim de qualquer forma).
+    # 5 sacrificadas (a nova é da MESMA raridade agora, não faria diferença
+    # de qualquer forma).
     db.creditar_xp_progressao(guild_id, user_id, 25 * raridade)
-    nova_personagem = db.personagem_por_id(novo_id)
-    mensagem = f"🔮 Merge concluído! 5 personagens {'⭐' * raridade} viraram **{nova_personagem['nome']}** {'⭐' * (raridade + 1)}."
-    return True, mensagem, False
+    # 🔥 Contador vitalício (2026-09-01, Conquistas do Colecionador,
+    # "col_merges") - sem rastro histórico em nenhuma outra tabela (só
+    # claims/trocas são deriváveis do ledger/`colecao_troca_proposta`).
+    db.incrementar_merges_realizados(guild_id, user_id)
+    estrelas = "⭐" * raridade
+    mensagem = f"🔮 Merge concluído! 5 personagens {estrelas} viraram **{escolhida['nome']}** {estrelas}."
+    return True, mensagem
 
 
 def criar_e_avaliar_troca(guild_id, proponente_id, alvo, oferece_ids, oferece_wishards, pede_ids, pede_wishards):
     """Núcleo de `/trocar propor` - extraído de `eris/bot.py::_trocar_
-    propor` (2026-08-29) pra ser compartilhado com o painel `🔄 Trocar`
+    propor` (2026-08-29) pra ser compartilhado com o painel `🔄 Trocas`
     (`eris/colecao/paineis.py`). `alvo`: `discord.Member`/`discord.User` de
     verdade (usa `.id`/`.bot`/`.display_name`/`.mention`). Devolve (status,
     mensagem, view_ou_None):

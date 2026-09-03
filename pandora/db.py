@@ -227,15 +227,170 @@ CREATE TABLE IF NOT EXISTS colecao_favoritas (
 -- personagem rolada porque o bot reiniciou no meio da janela de 1h).
 -- `expira_em` é calculado na hora de registrar (`duracao_card_segundos`
 -- da config do servidor NAQUELE momento) - igual o comportamento antigo.
+-- 🔥 PK composta (2026-09-01, favoritar/trocar direto do roll: "emoji pra
+-- favoritar personagem qnd aparece no roll, outro emoji que coleta mas
+-- coloca tag trade") - cada mensagem de roll agora tem ATÉ 3 reações
+-- válidas (claim normal/claim+favoritar/claim+tag "trade"), cada uma sua
+-- própria linha aqui (mesmo `personagem_id`, `acao` diferente). Migração
+-- de ruptura em `inicializar()` (tabela antiga tinha PK só em `message_id`
+-- e não tinha `acao`) - aceitável porque toda linha aqui é EFÊMERA
+-- (expira em minutos), nunca dado de economia/coleção de verdade.
 CREATE TABLE IF NOT EXISTS colecao_cards_pendentes (
-    message_id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
     guild_id TEXT NOT NULL,
     personagem_id INTEGER NOT NULL,
-    emoji TEXT NOT NULL,
-    expira_em TEXT NOT NULL
+    acao TEXT NOT NULL DEFAULT 'claim',
+    expira_em TEXT NOT NULL,
+    PRIMARY KEY (message_id, emoji)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cards_pendentes_guild ON colecao_cards_pendentes (guild_id, expira_em);
+
+-- Tags pessoais por personagem (2026-09-01, pedido do usuário: "outro
+-- emoji que coleta mas coloca tag trade, permitir filtrar por tag
+-- depois") - "trade" é a 1ª tag usada (reação 🔄 no roll), mas o campo é
+-- LIVRE (qualquer texto) pra não precisar migrar schema de novo se surgir
+-- outra tag no futuro. NUNCA confundir com `colecao_personagens.tags`
+-- (metadado do CATÁLOGO, importado da fonte externa) - esta aqui é do
+-- VÍNCULO jogador+personagem, mesmo escopo de `colecao_favoritas`.
+CREATE TABLE IF NOT EXISTS colecao_tags (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    personagem_id INTEGER NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, personagem_id, tag)
+);
+
+-- Batalha 5x5 com Aposta de Personagem (2026-09-01, spec completa do
+-- usuário - ver `pandora/batalha.py`) - 1 linha por desafio, estado 100%
+-- aqui (nunca em memória do processo) pra sobreviver a um restart do bot
+-- no meio de um desafio sem perder WiShards nem travar ninguém. `ordem_*`
+-- é a Party CONGELADA do jogador no momento em que ele fecha aquele lado
+-- (JSON, lista de personagem_id em ordem de posição 1..5) - a ordem em si
+-- é o que o documento chama de "secreta" (Seção 7), nunca muda depois de
+-- congelada. `status`: aguardando_defensor -> em_andamento (as 2 ordens já
+-- fechadas, mas ainda não resolvido - só existe internamente, o resolver
+-- roda tudo synchronous) -> concluida/cancelada (terminais). 🔥 Morte
+-- Súbita REMOVIDA (2026-09-02, pedido do usuário - ver `batalha.
+-- resolver_rodadas`) - status 'morte_subita' e as 2 colunas `escolha_
+-- morte_subita_*` abaixo ficam ÓRFÃS de propósito (nunca mais escritas,
+-- mesmo padrão de outras colunas órfãs já aceitas no ecossistema - não
+-- vale a pena uma migração destrutiva só pra limpar isso agora).
+CREATE TABLE IF NOT EXISTS colecao_batalha_desafios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    canal_id TEXT,
+    desafiante_id TEXT NOT NULL,
+    defensor_id TEXT NOT NULL,
+    personagem_id INTEGER NOT NULL,
+    aposta_wishards INTEGER NOT NULL,
+    ordem_desafiante TEXT NOT NULL,
+    ordem_defensor TEXT,
+    placar_desafiante INTEGER NOT NULL DEFAULT 0,
+    placar_defensor INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'aguardando_defensor',
+    escolha_morte_subita_desafiante TEXT,
+    escolha_morte_subita_defensor TEXT,
+    criado_em TEXT NOT NULL,
+    resolvido_em TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_batalha_desafios_guild_status ON colecao_batalha_desafios (guild_id, status);
+
+-- Cooldown por PAR desafiante->defensor (Seção 15: "24h pra desafiá-lo de
+-- novo") - evita perseguição do mesmo alvo em sequência.
+CREATE TABLE IF NOT EXISTS colecao_batalha_cooldown (
+    guild_id TEXT NOT NULL,
+    desafiante_id TEXT NOT NULL,
+    defensor_id TEXT NOT NULL,
+    ultimo_desafio_em TEXT NOT NULL,
+    PRIMARY KEY (guild_id, desafiante_id, defensor_id)
+);
+
+-- Limite de desafios RECEBIDOS por dia, por defensor (Seção 15: "máximo de
+-- 3 desafios recebidos por jogador por dia") - conta QUALQUER desafiante,
+-- reseta sozinho por `data` (YYYY-MM-DD UTC) mudar, sem job nenhum.
+CREATE TABLE IF NOT EXISTS colecao_batalha_defesas_hoje (
+    guild_id TEXT NOT NULL,
+    defensor_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    quantidade INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, defensor_id, data)
+);
+
+-- World Boss: evento cooperativo (2026-09-01, spec completa do usuário -
+-- ver `pandora/worldboss.py`) - 1 linha por aparição do Boss, POR guild.
+-- `estado_mecanica` (JSON) guarda o estado PRÓPRIO de cada mecânica
+-- especial (turnos de Enfurecer já passados, HP da Barreira, cabeças
+-- vivas da Hidra, renascimentos da Fênix, etc.) - cada mecânica só lê/
+-- escreve as chaves que usa, o motor genérico nunca olha pra dentro.
+-- `status`: inscricoes -> em_combate -> vitoria/derrota/expirado_por_turnos
+-- (terminais). `proximo_turno_em`/`inscricoes_fecham_em` são os ÚNICOS
+-- "relógios" que o scheduler (`pandora.worldboss.SchedulerWorldBoss`)
+-- confere a cada tick de 30s - todo o resto é derivado do banco, sem
+-- estado em memória do processo (restart-safe, mesmo espírito da Batalha
+-- 5x5 - um World Boss em andamento não pode travar nem "sumir" se o bot
+-- reiniciar no meio de um turno).
+CREATE TABLE IF NOT EXISTS colecao_worldboss_eventos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    canal_id TEXT,
+    boss_tipo TEXT NOT NULL,
+    boss_hp_maximo REAL NOT NULL,
+    boss_hp_atual REAL NOT NULL,
+    boss_atk_base REAL NOT NULL,
+    boss_atk_atual REAL NOT NULL,
+    estado_mecanica TEXT NOT NULL DEFAULT '{}',
+    time_hp_maximo REAL,
+    time_hp_atual REAL,
+    time_dano_turno REAL,
+    time_cura_turno REAL,
+    turno_atual INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'inscricoes',
+    dificuldade TEXT,
+    cp_recomendado REAL,
+    criado_em TEXT NOT NULL,
+    inscricoes_fecham_em TEXT NOT NULL,
+    proximo_turno_em TEXT,
+    concluido_em TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_worldboss_eventos_guild_status ON colecao_worldboss_eventos (guild_id, status);
+
+-- 1 personagem por (evento, jogador) - Seção 6: trocar de categoria
+-- SUBSTITUI a linha (`ON CONFLICT` faz upsert), nunca acumula 2. `origem`
+-- ("manual"/"automatica"/"bot", Seção 8/11) é só informativo, não muda a
+-- mecânica. `categorias_selecionadas` (JSON, ex.: '["DPS","Support"]') é o
+-- CONJUNTO de categorias que o jogador permitiu (Seção 5) - `personagem_
+-- id`/`categoria`/`cp` são sempre recalculados a partir desse conjunto
+-- (a personagem de maior CP entre as categorias permitidas), nunca
+-- editados diretamente. `personagem_id` NULO só pra `origem='bot'`
+-- (2026-09-01, pedido do usuário: "o CP dos bots vai ser a media dos
+-- players participante" - bot não tem personagem de verdade, `user_id`
+-- sintético "bot:1"/"bot:2", nunca um snowflake real do Discord).
+CREATE TABLE IF NOT EXISTS colecao_worldboss_participantes (
+    evento_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    personagem_id INTEGER,
+    categoria TEXT NOT NULL,
+    categorias_selecionadas TEXT NOT NULL,
+    cp REAL NOT NULL,
+    origem TEXT NOT NULL DEFAULT 'manual',
+    entrou_em TEXT NOT NULL,
+    PRIMARY KEY (evento_id, user_id)
+);
+
+-- Preferência de Entrada Automática por jogador (Seção 8/9) - só usada
+-- DEPOIS que as inscrições manuais encerram (Seção 10), pra quem não
+-- entrou manualmente nesse evento.
+CREATE TABLE IF NOT EXISTS colecao_worldboss_auto (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    ativo INTEGER NOT NULL DEFAULT 0,
+    categorias TEXT NOT NULL DEFAULT '["DPS","Tank","Support"]',
+    PRIMARY KEY (guild_id, user_id)
+);
 
 -- Party (equipe de gameplay, ainda sem Torre pra jogar - protege contra
 -- Merge desde já) e Vitrine (mostruário público) - MESMA forma (até 5
@@ -339,6 +494,143 @@ CREATE TABLE IF NOT EXISTS colecao_cidade_estado (
     cp_bonus_colecao_fixo REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
 );
+
+-- World Boss: Recompensas e Conquistas (2026-09-01, spec completa do
+-- usuário - ver `pandora/conquistas.py`/`pandora/itens.py`) - Conquistas
+-- são um registro PURO (Seção 15: "não concedem WiShards/XP/Soulstones/
+-- itens/personagens/bônus"), guild-scoped (mesmo critério de tudo mais no
+-- ecossistema - cada servidor é uma progressão independente).
+CREATE TABLE IF NOT EXISTS colecao_conquistas (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    conquista_id TEXT NOT NULL,
+    desbloqueada_em TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, conquista_id)
+);
+
+-- Inventário genérico de itens consumíveis (Seção 6 do documento de
+-- recompensas - Proteção/Revanche/Chave da Torre/Upgrade de Construção/
+-- Chamado/Roll Permanente/Claim Permanente). `item` é a chave do
+-- catálogo fechado em `pandora.itens.CATALOGO_ITENS`.
+CREATE TABLE IF NOT EXISTS colecao_inventario (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    item TEXT NOT NULL,
+    quantidade INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, item)
+);
+
+-- 🛡️ Proteção (Seção 7) aplicada - permanente até o jogador remover (sem
+-- prazo definido na spec, "balanceável depois") - mesmo espírito de
+-- `colecao_favoritas`, mas voltada pra proteção contra a Batalha 5x5
+-- especificamente (`pandora.batalha.iniciar_desafio` confere isso).
+CREATE TABLE IF NOT EXISTS colecao_protecao_pvp (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    personagem_id INTEGER NOT NULL,
+    aplicada_em TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, personagem_id)
+);
+
+-- ⚔️ Revanche (Seção 8) - registra toda personagem PERDIDA via Batalha
+-- 5x5 (`jogador_perdedor_id` é quem tinha antes) - usar uma Revanche
+-- contra essa linha ignora cooldown/limite diário normais do desafio
+-- (Seção 8: "ainda precisa disputar através das regras da batalha" -
+-- só a RESTRIÇÃO de frequência é ignorada, não o combate em si).
+-- `recuperada` só vira 1 quando o jogador original vence de volta.
+CREATE TABLE IF NOT EXISTS colecao_batalha_personagens_perdidas (
+    guild_id TEXT NOT NULL,
+    personagem_id INTEGER NOT NULL,
+    jogador_perdedor_id TEXT NOT NULL,
+    perdida_em TEXT NOT NULL,
+    recuperada INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, personagem_id, jogador_perdedor_id)
+);
+
+-- 🗝️ Chave da Torre (Seção 9) - flag de "próxima tentativa de andar
+-- ignora a restrição" (consumida no próximo `torre.tentar_andar`,
+-- vença ou perca - a Chave paga pela TENTATIVA sem restrição, não pela
+-- vitória).
+CREATE TABLE IF NOT EXISTS colecao_torre_chave_ativa (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    ativa INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+-- 🏗️ Upgrade de Construção (Seção 10) - nível permanente por área da
+-- Cidade, por jogador - cada nível aumenta o efeito daquela área
+-- (`pandora.cidade` aplica o bônus na conversão de Poder).
+CREATE TABLE IF NOT EXISTS colecao_construcoes (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    area TEXT NOT NULL,
+    nivel INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, area)
+);
+
+-- 📯 Chamado (Seção 11) - escolhe o Boss do PRÓXIMO horário fixo desse
+-- servidor (não cria evento extra) - `pandora.worldboss.iniciar_evento`
+-- confere e consome isso antes de sortear aleatoriamente.
+CREATE TABLE IF NOT EXISTS colecao_worldboss_proximo_forcado (
+    guild_id TEXT PRIMARY KEY,
+    boss_tipo TEXT NOT NULL
+);
+
+-- Estatística de participação com sucesso na Torre, por personagem
+-- (2026-09-01, pedido do usuário: "estatísticas de participação com
+-- sucesso na torre por personagens, p saber quais personagens mais
+-- subiram torre") - incrementado 1x por personagem TODA VEZ que a Party
+-- dela vence um andar (`torre.tentar_andar`), nunca em tentativas
+-- perdidas (só "participação com SUCESSO").
+CREATE TABLE IF NOT EXISTS colecao_torre_estatisticas (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    personagem_id INTEGER NOT NULL,
+    andares_vencidos INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, personagem_id)
+);
+
+-- Séries Favoritas (2026-09-02, `pandora.series_favoritas`) - até
+-- `SLOTS_MAXIMO` slots por jogador (5 base + upgrades pagos), cada um
+-- guardando a série ESCOLHIDA nesse slot. A linha só existe depois do
+-- slot ser usado 1x - "vazio" (nunca usado) é AUSÊNCIA de linha, o que
+-- permite a 1ª escolha ser instantânea; depois disso a linha nunca é
+-- apagada (só `serie` vira NULL pra "esvaziar"), porque `bloqueado_ate`
+-- precisa sobreviver pra impedir trocar de novo antes do cooldown -
+-- devolver ao estado "nunca usado" reabriria a brecha de trocar toda hora
+-- sem esperar.
+CREATE TABLE IF NOT EXISTS colecao_series_favoritas (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    serie TEXT,
+    trocado_em TEXT NOT NULL,
+    bloqueado_ate TEXT,
+    PRIMARY KEY (guild_id, user_id, slot)
+);
+
+-- Snapshot do bônus de CP por Série Favorita (2026-09-02) - CARO calcular
+-- (precisa saber, pra cada série favoritada, se a coleção/nível/soulbond
+-- daquela série estão completos - varre a coleção do jogador FILTRADA por
+-- série), então nunca é recalculado no caminho quente (`torre.
+-- power_personagem`/`_contexto_lote` só LEEM esta tabela) - só depois de
+-- ações que mudam completude (claim/nível/afinidade/divórcio/merge/troca
+-- de série favorita), mesmo padrão de `colecao_cidade_estado`/
+-- `atualizar_snapshot_bonus`. 1 linha por série favoritada ATUAL - trocar
+-- a série de um slot REMOVE a linha antiga (`pandora.series_favoritas.
+-- recalcular_bonus` apaga o que não está mais nas favoritas do jogador).
+CREATE TABLE IF NOT EXISTS colecao_series_favoritas_bonus (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    serie TEXT NOT NULL,
+    bonus_percentual REAL NOT NULL DEFAULT 0,
+    colecao_completa INTEGER NOT NULL DEFAULT 0,
+    maestria_completa INTEGER NOT NULL DEFAULT 0,
+    soulbond_completo INTEGER NOT NULL DEFAULT 0,
+    atualizado_em TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, serie)
+);
 """
 
 # 🔥 Usado só pela migração de `inicializar()` acima - precisa ficar em SQL
@@ -357,6 +649,12 @@ _NOVAS_COLUNAS_CONFIG_COLECAO = {
     # `guild.system_channel` na hora (sem migração pra preencher, ver
     # `/colecao_admin canal`).
     "canal_anuncio_id": "TEXT",
+    # 🔥 Cooldown de 24h entre desafios de Batalha ao MESMO jogador
+    # (2026-09-02, pedido do usuário: "remove esse bloqueio... deixa ele
+    # opcional e desmarcado por padrao") - era fixo/obrigatório antes;
+    # virou config por servidor, DESLIGADO por padrão (`DEFAULT 0`) - um
+    # admin que preferir o cooldown de volta liga via `/colecao_admin`.
+    "cooldown_batalha_ativo": "INTEGER NOT NULL DEFAULT 0",
 }
 
 # 🔥 Defaults quando o servidor nunca configurou nada (`colecao_
@@ -373,6 +671,7 @@ _CONFIG_COLECAO_PADRAO = {
     "max_rolls_por_comando": 10,
     "chance_wish_roll": 0.20,
     "canal_anuncio_id": None,
+    "cooldown_batalha_ativo": False,
 }
 
 # 🔥 Tiers de raridade fixos por personagem (1=comum .. 5=lendária),
@@ -409,6 +708,18 @@ def conexao():
 
 def inicializar():
     with conexao() as conn:
+        # 🔥 Migração de RUPTURA (2026-09-01) - `colecao_cards_pendentes`
+        # trocou a PK de `message_id` sozinho pra `(message_id, emoji)`
+        # (favoritar/trocar direto do roll, ver `_SCHEMA` acima) - SQLite
+        # não altera PRIMARY KEY de tabela existente, então derruba a
+        # tabela ANTIGA (sem a coluna `acao`) antes do `executescript`
+        # recriar do zero - só descarta cards de roll ainda pendentes bem
+        # no instante do deploy (efêmero, nunca economia/coleção real).
+        tabelas = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "colecao_cards_pendentes" in tabelas:
+            colunas_cards = {r["name"] for r in conn.execute("PRAGMA table_info(colecao_cards_pendentes)")}
+            if "acao" not in colunas_cards:
+                conn.execute("DROP TABLE colecao_cards_pendentes")
         conn.executescript(_SCHEMA)
         # 🔥 Migração aditiva (2026-08-29) - `colecao_personagens` já tinha
         # 30 mil linhas importadas antes da coluna `raridade` existir;
@@ -508,6 +819,68 @@ def inicializar():
         # config do servidor - mesmo espírito do upgrade de rolls).
         if "nivel_upgrade_claims" not in colunas_estado:
             conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN nivel_upgrade_claims INTEGER NOT NULL DEFAULT 0")
+        # 🔥 Roll/Claim Permanente (2026-09-01, drop raro do World Boss/Loja,
+        # Seção 12/13) - bônus SEPARADO do upgrade pago (`nivel_upgrade_
+        # rolls`/`nivel_upgrade_claims` acima), nunca substitui, só soma.
+        # `_drop` (ganho no World Boss) e `_loja` (comprado com WiShards)
+        # são CONTADOS SEPARADOS (2026-09-01, pedido do usuário: "os
+        # rolls/claims permanentes vendidos na loja sao contados diferentes
+        # se ganhos do boss") - cada um com seu próprio teto (`pandora.
+        # itens.LIMITE_ROLL_PERMANENTE`/`LIMITE_CLAIM_PERMANENTE`), então o
+        # máximo combinado é o dobro de um só (5+5=10 rolls, por exemplo).
+        if "bonus_rolls_permanente_drop" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN bonus_rolls_permanente_drop INTEGER NOT NULL DEFAULT 0")
+        if "bonus_claims_permanente_drop" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN bonus_claims_permanente_drop INTEGER NOT NULL DEFAULT 0")
+        if "bonus_rolls_permanente_loja" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN bonus_rolls_permanente_loja INTEGER NOT NULL DEFAULT 0")
+        if "bonus_claims_permanente_loja" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN bonus_claims_permanente_loja INTEGER NOT NULL DEFAULT 0")
+        # 🔥 Contadores VITALÍCIOS pras Conquistas do Colecionador
+        # (2026-09-01, `ERIS_sistema_colecao_wishards.md` Seções 22/24,
+        # excluindo Seção 23 "Conquistas musicais" - pedido do usuário:
+        # "so a parte de musica que acho que n é direto com pandora") -
+        # rolls/merges não deixam nenhum outro rastro histórico no banco
+        # (diferente de claims/trocas, deriváveis do ledger/`colecao_
+        # troca_proposta`), por isso são os 2 ÚNICOS contadores novos
+        # precisos - o resto de `pandora.conquistas.verificar_colecionador`
+        # é tudo calculado sob demanda a partir de tabelas que já existem.
+        if "total_rolls_realizados" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN total_rolls_realizados INTEGER NOT NULL DEFAULT 0")
+        if "total_merges_realizados" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN total_merges_realizados INTEGER NOT NULL DEFAULT 0")
+
+        # 🔥 Recompensa Diária (2026-09-02, pedido do usuário: "recompensa
+        # diária" - Seção 6/29 do plano original) - `diaria_reivindicada_em`
+        # guarda só a DATA (não hora) da última reivindicação, comparada em
+        # UTC - reset é por DIA DE CALENDÁRIO, não uma janela rolante de 24h
+        # (diferente de rolls/claims), pra sempre poder resgatar de novo a
+        # partir da meia-noite UTC, não 24h exatas depois do último clique.
+        if "diaria_reivindicada_em" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN diaria_reivindicada_em TEXT")
+        # 🔥 Slots extras de Série Favorita (2026-09-02, `pandora.series_
+        # favoritas`) - 5 slots base (sem custo, sem coluna) + até 5 slots
+        # pagos aqui (nível 0-5), mesmo espírito do upgrade de rolls/claims.
+        if "nivel_upgrade_slots_serie_favorita" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN nivel_upgrade_slots_serie_favorita INTEGER NOT NULL DEFAULT 0")
+        # 🔥 Auto-Defesa de Batalha (2026-09-02, pedido do usuário: "É
+        # possivel deixar configurado p players tbm") - jogador liga essa
+        # opção pra ser defendido automaticamente na hora (mesma lógica de
+        # `batalha.defesa_automatica` usada pra bots), sem precisar esperar
+        # nem responder manualmente - desligado por padrão.
+        if "auto_defesa_batalha_ativa" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN auto_defesa_batalha_ativa INTEGER NOT NULL DEFAULT 0")
+
+        # 🔥 Canal do desafio de Batalha (2026-09-02) - pra o scheduler de
+        # auto-defesa (`batalha.SchedulerBatalha`) saber ONDE postar o
+        # resultado de um desafio resolvido sem interação nenhuma do
+        # Discord (o defensor nunca respondeu, 10min se esgotaram) -
+        # `canal_id` já é coluna nova em `colecao_batalha_desafios` desde a
+        # criação da tabela, então só bancos ANTIGOS (antes de hoje)
+        # precisam da migração aditiva.
+        colunas_batalha = {r["name"] for r in conn.execute("PRAGMA table_info(colecao_batalha_desafios)")}
+        if "canal_id" not in colunas_batalha:
+            conn.execute("ALTER TABLE colecao_batalha_desafios ADD COLUMN canal_id TEXT")
 
         # 🔥 Prova de Soulmate (2026-08-29) - substitui o auto-flag antigo
         # ("Afinidade 10 == Soulmate", só cosmético `💍`) por uma tentativa de
@@ -530,6 +903,17 @@ def inicializar():
         # Soulmate - o vínculo do jogador com ESSA personagem específica.
         if "nivel" not in colunas_afinidade:
             conn.execute("ALTER TABLE colecao_afinidade ADD COLUMN nivel INTEGER NOT NULL DEFAULT 1")
+
+        # 🔥 Dificuldade/CP recomendado do World Boss (2026-09-02, pedido do
+        # usuário: "seria bom se as dificuldades fossem fixas, mostrando CP
+        # recomendado") - snapshot calculado 1x no spawn (Seção 7, mesmo
+        # espírito do CP congelado dos participantes), nunca recalculado
+        # durante o evento.
+        colunas_worldboss = {r["name"] for r in conn.execute("PRAGMA table_info(colecao_worldboss_eventos)")}
+        if "dificuldade" not in colunas_worldboss:
+            conn.execute("ALTER TABLE colecao_worldboss_eventos ADD COLUMN dificuldade TEXT")
+        if "cp_recomendado" not in colunas_worldboss:
+            conn.execute("ALTER TABLE colecao_worldboss_eventos ADD COLUMN cp_recomendado REAL")
 
         # 🔥 Backfill ÚNICO de `colecao_classes` (2026-08-30) - só roda se a
         # tabela nova estiver vazia (idempotente, nunca sobrescreve uma
@@ -698,6 +1082,7 @@ def obter_configuracao_colecao(guild_id):
         "max_rolls_por_comando": linha["max_rolls_por_comando"],
         "chance_wish_roll": linha["chance_wish_roll"],
         "canal_anuncio_id": linha["canal_anuncio_id"],
+        "cooldown_batalha_ativo": bool(linha["cooldown_batalha_ativo"]),
     }
 
 
@@ -807,10 +1192,12 @@ def personagens_por_popularidade(limite, permitir_nsfw):
 
 
 def personagens_livres_por_raridade(guild_id, raridade, permitir_nsfw, limite=10):
-    """Amostra de personagens SEM DONO nesse servidor, pra `/loja ver` -
-    diferente de `candidatos_por_raridade` (pool de ROLL, que desde
-    2026-08-29 inclui personagens já reivindicadas de propósito), a loja só
-    pode vender quem está livre (Seção 10)."""
+    """Amostra ALEATÓRIA de personagens SEM DONO nesse servidor, pra
+    `/loja ver` - diferente de `candidatos_por_raridade` (pool de ROLL,
+    que desde 2026-08-29 inclui personagens já reivindicadas de
+    propósito), a loja só pode vender quem está livre (Seção 10). Usada
+    quando o jogador não digita nome nenhum (ver `personagens_livres_
+    por_raridade_e_nome` pra busca por SUBSTRING)."""
     filtros = ["p.ativo = 1", "p.raridade = ?"]
     params = [raridade]
     if not permitir_nsfw:
@@ -818,6 +1205,27 @@ def personagens_livres_por_raridade(guild_id, raridade, permitir_nsfw, limite=10
     filtros.append("p.id NOT IN (SELECT personagem_id FROM colecao_propriedade WHERE guild_id = ?)")
     params.append(str(guild_id))
     sql = f"SELECT p.* FROM colecao_personagens p WHERE {' AND '.join(filtros)} ORDER BY RANDOM() LIMIT ?"
+    params.append(limite)
+    with conexao() as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def personagens_livres_por_raridade_e_nome(guild_id, raridade, permitir_nsfw, nome, limite=25):
+    """Mesma regra de `personagens_livres_por_raridade` (SEM DONO nesse
+    servidor) - mas filtrando por SUBSTRING do nome (case-insensitive) em
+    vez de amostra ALEATÓRIA (2026-09-03, pedido do usuário: "Coloca para
+    o comprar deixar escrever parte do nome tbm, assim como foi na
+    serie") - a Loja só mostrava uma amostra aleatória de até 25 livres
+    por raridade, impossível de achar uma personagem ESPECÍFICA numa
+    raridade com milhares de livres. Ordenado por popularidade DESC
+    (mesmo critério de todo dropdown que lista personagem)."""
+    filtros = ["p.ativo = 1", "p.raridade = ?", "LOWER(p.nome) LIKE LOWER(?)"]
+    params = [raridade, f"%{nome}%"]
+    if not permitir_nsfw:
+        filtros.append("p.nsfw = 0")
+    filtros.append("p.id NOT IN (SELECT personagem_id FROM colecao_propriedade WHERE guild_id = ?)")
+    params.append(str(guild_id))
+    sql = f"SELECT p.* FROM colecao_personagens p WHERE {' AND '.join(filtros)} ORDER BY p.popularidade DESC LIMIT ?"
     params.append(limite)
     with conexao() as conn:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -985,6 +1393,50 @@ def colecao_do_usuario(guild_id, user_id):
         return [dict(r) for r in linhas]
 
 
+def contar_colecao_do_usuario(guild_id, user_id):
+    """Só a CONTAGEM (2026-09-01, achado do usuário: "qnd eu dou claim
+    pelos botoes... da GAIA não respondeu a tempo") - `checar_marcos_
+    colecao` só precisava de `len(colecao_do_usuario(...))`, mas isso
+    materializa a coleção INTEIRA (JOIN com 2 tabelas + um dict por linha)
+    só pra jogar fora e contar - ficava rodando em TODO claim (o caminho
+    mais quente do jogo), sem `to_thread`, bloqueando o event loop pra
+    coleções grandes (usuário já tinha citado "mesmo q tenha mais de
+    10k"). `COUNT(*)` puro nunca materializa linha nenhuma."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT COUNT(*) AS total FROM colecao_propriedade WHERE guild_id = ? AND dono_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    return linha["total"]
+
+
+def colecao_do_usuario_paginada(guild_id, user_id, offset, limite=25):
+    """Página da coleção, ordenada por uma aproximação BARATA de CP
+    (Nível do vínculo + popularidade do catálogo - ambas colunas SQL
+    diretas, sem calcular o CP de verdade de ninguém só pra paginar) -
+    2026-09-01, pedido do usuário: "o botão de passar pros lados... deveria
+    ser todos os possuídos, mesmo q tenha mais de 10k... não precisa
+    carregar tudo, mas pode carregar de 25 em 25". CP EXATO de cada item
+    da página é calculado depois, só pra exibir (`torre.power_personagem`),
+    nunca pra ordenar a coleção inteira - a ordem aqui é uma aproximação
+    (Nível/popularidade correlacionam bem com CP, mas não são o cálculo
+    exato) trocada de propósito pela função barata de paginar."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.*, c.reivindicado_em, COALESCE(a.afinidade, 1) AS afinidade, "
+            "COALESCE(a.is_soulmate, 0) AS is_soulmate "
+            "FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "LEFT JOIN colecao_afinidade a "
+            "  ON a.guild_id = c.guild_id AND a.user_id = c.dono_id AND a.personagem_id = c.personagem_id "
+            "WHERE c.guild_id = ? AND c.dono_id = ? "
+            "ORDER BY COALESCE(a.nivel, 1) DESC, p.popularidade DESC "
+            "LIMIT ? OFFSET ?",
+            (str(guild_id), str(user_id), limite, offset),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
 def dono_do_personagem(guild_id, personagem_id):
     with conexao() as conn:
         linha = conn.execute(
@@ -994,14 +1446,374 @@ def dono_do_personagem(guild_id, personagem_id):
         return linha["dono_id"] if linha else None
 
 
-def ranking_guild(guild_id, limite=10):
+# 🔥 Rankings expandidos (2026-09-02, pedido do usuário - Seção 25 do
+# plano original: "rankings futuros podem considerar tamanho/valor da
+# coleção, Soulmates, séries completas, conquistas e Torre") - só as
+# métricas com query BARATA de 1 tabela só, sem N+1 (séries completas/
+# conquistas por jogador ficam de fora por enquanto - exigiriam varrer a
+# coleção de CADA jogador do servidor, caro pra um ranking do servidor
+# inteiro; `estatisticas_series`, abaixo, já cobre completude por série mas
+# só das SÉRIES FAVORITADAS de um jogador, nunca em lote pra um servidor
+# todo). Todas
+# devolvem as mesmas colunas (`dono_id`, `total`) - `consulta.
+# formatar_ranking` nunca precisa saber qual métrica está lendo.
+_RANKING_QUERIES = {
+    "colecao": (
+        "SELECT dono_id, COUNT(*) AS total FROM colecao_propriedade "
+        "WHERE guild_id = ? GROUP BY dono_id ORDER BY total DESC LIMIT ?"
+    ),
+    "soulmates": (
+        "SELECT user_id AS dono_id, COUNT(*) AS total FROM colecao_afinidade "
+        "WHERE guild_id = ? AND is_soulmate = 1 GROUP BY user_id ORDER BY total DESC LIMIT ?"
+    ),
+    "torre": (
+        "SELECT user_id AS dono_id, andar_atual AS total FROM colecao_torre_progresso "
+        "WHERE guild_id = ? ORDER BY total DESC LIMIT ?"
+    ),
+}
+RANKINGS_DISPONIVEIS = {"colecao": "📚 Coleção", "soulmates": "💞 Soulmates", "torre": "🗼 Torre"}
+
+
+def ranking_guild(guild_id, metrica="colecao", limite=10):
+    query = _RANKING_QUERIES.get(metrica, _RANKING_QUERIES["colecao"])
+    with conexao() as conn:
+        linhas = conn.execute(query, (str(guild_id), limite)).fetchall()
+        return [dict(r) for r in linhas]
+
+
+def resumo_perfil_raridade(guild_id, user_id):
+    """1 linha por raridade (1-5★) com contagem de nível máximo/afinidade
+    máxima/soulmates DENTRO daquela raridade (2026-09-02, redesenho do
+    `/perfil` - pedido do usuário: "tabela de progressão por raridade...
+    conforme sua coleção chegar a milhares, 310 personagens no nível
+    máximo isoladamente começa a dizer pouco" - por isso o percentual
+    sempre acompanha a contagem, calculado por quem exibe). 1 query só
+    (GROUP BY raridade), nunca materializa a coleção inteira em memória.
+    Devolve `[{"raridade", "total", "nivel_maximo", "afinidade_maxima",
+    "soulmates"}, ...]` ordenado 1★->5★ - só raridades com pelo menos 1
+    personagem possuída aparecem."""
     with conexao() as conn:
         linhas = conn.execute(
-            "SELECT dono_id, COUNT(*) AS total FROM colecao_propriedade WHERE guild_id = ? "
-            "GROUP BY dono_id ORDER BY total DESC LIMIT ?",
-            (str(guild_id), limite),
+            "SELECT p.raridade AS raridade, COUNT(*) AS total, "
+            "SUM(CASE WHEN COALESCE(a.nivel, 1) >= ? THEN 1 ELSE 0 END) AS nivel_maximo, "
+            "SUM(CASE WHEN COALESCE(a.afinidade, 1) >= ? THEN 1 ELSE 0 END) AS afinidade_maxima, "
+            "SUM(CASE WHEN COALESCE(a.is_soulmate, 0) = 1 THEN 1 ELSE 0 END) AS soulmates "
+            "FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "LEFT JOIN colecao_afinidade a "
+            "  ON a.guild_id = c.guild_id AND a.user_id = c.dono_id AND a.personagem_id = c.personagem_id "
+            "WHERE c.guild_id = ? AND c.dono_id = ? "
+            "GROUP BY p.raridade ORDER BY p.raridade",
+            (NIVEL_MAXIMO_PERSONAGEM, NIVEL_MAXIMO_AFINIDADE, str(guild_id), str(user_id)),
         ).fetchall()
-        return [dict(r) for r in linhas]
+    return [dict(r) for r in linhas]
+
+
+def resumo_perfil_geral(guild_id, user_id):
+    """Totais do topo do `/perfil` (personagens/nível máximo/afinidade
+    máxima/soulmates) - soma direto de `resumo_perfil_raridade` (mesma
+    query, sem escanear a coleção de novo)."""
+    por_raridade = resumo_perfil_raridade(guild_id, user_id)
+    return {
+        "total": sum(r["total"] for r in por_raridade),
+        "nivel_maximo": sum(r["nivel_maximo"] for r in por_raridade),
+        "afinidade_maxima": sum(r["afinidade_maxima"] for r in por_raridade),
+        "soulmates": sum(r["soulmates"] for r in por_raridade),
+    }
+
+
+def estatisticas_series(guild_id, user_id, series):
+    """Estatísticas de completude por série, só das séries em `series`
+    (2026-09-02, usado tanto pelo snapshot de bônus de Série Favorita
+    quanto pela exibição delas no `/perfil` - nunca escaneia séries que o
+    jogador não favoritou). Devolve `{serie: {"total_catalogo",
+    "possuidas", "nivel_maximo", "afinidade_maxima", "soulmates"}}` -
+    séries sem NENHUMA personagem possuída ainda aparecem com
+    `possuidas=0` (pra mostrar "0/total" em vez de sumir da lista).
+    `afinidade_maxima` (2026-09-03, pedido do usuário: "sao 5% de possuir
+    tudo, 5% de tudo nivel max, 5% afinidade max, 5% soulbound") - conta
+    separada de `nivel_maximo`, mesmo padrão de `resumo_perfil_raridade`."""
+    series = [s for s in series if s]
+    if not series:
+        return {}
+    with conexao() as conn:
+        marcadores = ",".join("?" * len(series))
+        totais = conn.execute(
+            f"SELECT serie, COUNT(*) AS total FROM colecao_personagens "
+            f"WHERE serie IN ({marcadores}) GROUP BY serie",
+            series,
+        ).fetchall()
+        possuidas = conn.execute(
+            f"SELECT p.serie AS serie, COUNT(*) AS possuidas, "
+            f"SUM(CASE WHEN COALESCE(a.nivel, 1) >= ? THEN 1 ELSE 0 END) AS nivel_maximo, "
+            f"SUM(CASE WHEN COALESCE(a.afinidade, 1) >= ? THEN 1 ELSE 0 END) AS afinidade_maxima, "
+            f"SUM(CASE WHEN COALESCE(a.is_soulmate, 0) = 1 THEN 1 ELSE 0 END) AS soulmates "
+            f"FROM colecao_propriedade c JOIN colecao_personagens p ON p.id = c.personagem_id "
+            f"LEFT JOIN colecao_afinidade a "
+            f"  ON a.guild_id = c.guild_id AND a.user_id = c.dono_id AND a.personagem_id = c.personagem_id "
+            f"WHERE c.guild_id = ? AND c.dono_id = ? AND p.serie IN ({marcadores}) "
+            f"GROUP BY p.serie",
+            [NIVEL_MAXIMO_PERSONAGEM, NIVEL_MAXIMO_AFINIDADE, str(guild_id), str(user_id), *series],
+        ).fetchall()
+    resultado = {
+        s: {"total_catalogo": 0, "possuidas": 0, "nivel_maximo": 0, "afinidade_maxima": 0, "soulmates": 0}
+        for s in series
+    }
+    for linha in totais:
+        resultado[linha["serie"]]["total_catalogo"] = linha["total"]
+    for linha in possuidas:
+        resultado[linha["serie"]]["possuidas"] = linha["possuidas"]
+        resultado[linha["serie"]]["nivel_maximo"] = linha["nivel_maximo"]
+        resultado[linha["serie"]]["afinidade_maxima"] = linha["afinidade_maxima"]
+        resultado[linha["serie"]]["soulmates"] = linha["soulmates"]
+    return resultado
+
+
+def encontrar_serie_por_nome(nome):
+    """Resolve o nome CANÔNICO (grafia exata do catálogo) por busca
+    case-insensitive (2026-09-02, favoritar série - jogador digita de
+    cabeça, não copia/cola do catálogo) - devolve `None` se não achar
+    nenhuma série com esse nome (nem parecido)."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT DISTINCT serie FROM colecao_personagens WHERE serie IS NOT NULL AND LOWER(serie) = LOWER(?) LIMIT 1",
+            (nome,),
+        ).fetchone()
+    return linha["serie"] if linha else None
+
+
+def series_do_catalogo(prefixo=None, limite=25):
+    """Lista de séries distintas do catálogo, opcionalmente filtradas por
+    prefixo (case-insensitive) - usado pra sugerir nomes parecidos quando
+    o jogador erra a grafia ao favoritar uma série."""
+    with conexao() as conn:
+        if prefixo:
+            linhas = conn.execute(
+                "SELECT DISTINCT serie FROM colecao_personagens "
+                "WHERE serie IS NOT NULL AND serie != '' AND LOWER(serie) LIKE LOWER(?) "
+                "ORDER BY serie LIMIT ?",
+                (f"%{prefixo}%", limite),
+            ).fetchall()
+        else:
+            linhas = conn.execute(
+                "SELECT DISTINCT serie FROM colecao_personagens WHERE serie IS NOT NULL AND serie != '' ORDER BY serie LIMIT ?",
+                (limite,),
+            ).fetchall()
+    return [r["serie"] for r in linhas]
+
+
+def personagens_da_serie(guild_id, serie, permitir_nsfw=True):
+    """TODOS os personagens ATIVOS do catálogo de uma série - devolve o
+    `dono_id` (`None` se livre nesse servidor) junto, pra quem chama saber
+    se pode comprar. Usado pelo navegador rápido de Série Favorita
+    (2026-09-03, pedido do usuário: "qnd seleciono uma serie, ele abre os
+    personagens... soq com um botao de comprar tbm") - ordenado por
+    popularidade DESC, mesmo critério de sempre."""
+    filtros = ["p.serie = ?", "p.ativo = 1"]
+    params = [serie]
+    if not permitir_nsfw:
+        filtros.append("p.nsfw = 0")
+    sql = (
+        "SELECT p.*, c.dono_id FROM colecao_personagens p "
+        "LEFT JOIN colecao_propriedade c ON c.personagem_id = p.id AND c.guild_id = ? "
+        f"WHERE {' AND '.join(filtros)} ORDER BY p.popularidade DESC"
+    )
+    with conexao() as conn:
+        return [dict(r) for r in conn.execute(sql, [str(guild_id)] + params).fetchall()]
+
+
+def contar_personagens_da_serie(serie, permitir_nsfw=True):
+    """Só a CONTAGEM (COUNT(*) puro, barato) de personagens ATIVOS de uma
+    série - pro navegador de Série Favorita paginar por POSIÇÃO igual o
+    "🔍 Personagem" faz pra coleção (2026-09-03, pedido do usuário: "Faz
+    o msm esquemas das personagens, o skip com 25, o dropdown com base na
+    posição. E corrige o limite q hj é so 25" - até aqui o navegador
+    carregava só os 25 primeiros por popularidade e parava)."""
+    filtros = ["serie = ?", "ativo = 1"]
+    params = [serie]
+    if not permitir_nsfw:
+        filtros.append("nsfw = 0")
+    sql = f"SELECT COUNT(*) AS total FROM colecao_personagens WHERE {' AND '.join(filtros)}"
+    with conexao() as conn:
+        return conn.execute(sql, params).fetchone()["total"]
+
+
+def personagens_da_serie_paginada(guild_id, serie, permitir_nsfw, offset, limite=25):
+    """Página (`OFFSET`/`LIMIT`) dos personagens ATIVOS de uma série, com
+    `dono_id` - MESMA ordem de `personagens_da_serie` (popularidade DESC,
+    crítico: é a ordem que numera a POSIÇÃO usada pelo navegador,
+    `contar_personagens_da_serie` tem que contar sobre a mesma base)."""
+    filtros = ["p.serie = ?", "p.ativo = 1"]
+    params = [serie]
+    if not permitir_nsfw:
+        filtros.append("p.nsfw = 0")
+    sql = (
+        "SELECT p.*, c.dono_id FROM colecao_personagens p "
+        "LEFT JOIN colecao_propriedade c ON c.personagem_id = p.id AND c.guild_id = ? "
+        f"WHERE {' AND '.join(filtros)} ORDER BY p.popularidade DESC LIMIT ? OFFSET ?"
+    )
+    with conexao() as conn:
+        return [dict(r) for r in conn.execute(sql, [str(guild_id)] + params + [limite, offset]).fetchall()]
+
+
+# --------------------------------------------------------------------------
+# Séries Favoritas (2026-09-02, `pandora.series_favoritas`) - até 5 slots
+# base + upgrades pagos. CRUD puro aqui - cálculo do bônus mora em
+# `pandora.series_favoritas` (usa `estatisticas_series` acima).
+#
+# 🔥 Cooldown de troca REMOVIDO (2026-09-03, pedido do usuário: "remove
+# esse bloqueio Esse slot só pode trocar de novo em 7 dia(s)") - existia
+# um cooldown de `COOLDOWN_DIAS_TROCA_SERIE_FAVORITA` dias entre trocas do
+# MESMO slot (pedido do próprio usuário em 2026-09-02: "trocar uma Série
+# Favorita não pode ser instantaneamente explorável... vou usar Megumin
+# -> favorito KonoSuba -> ganho +20% -> luto -> tiro KonoSuba" - decidiu
+# tirar depois). `bloqueado_ate` continua existindo na tabela (sem
+# migração destrutiva) mas nunca mais é escrito com um valor de verdade -
+# `definir_serie_favorita` sempre grava `None` e nunca mais recusa troca.
+# --------------------------------------------------------------------------
+
+
+def series_favoritas_do_jogador(guild_id, user_id):
+    """Só os slots JÁ USADOS pelo menos 1x (linha existe) - slot nunca
+    tocado não aparece aqui (é "vazio" por ausência, ver comentário da
+    tabela). Devolve `[{"slot", "serie", "trocado_em", "bloqueado_ate"}]`
+    ordenado por slot."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT slot, serie, trocado_em, bloqueado_ate FROM colecao_series_favoritas "
+            "WHERE guild_id = ? AND user_id = ? ORDER BY slot",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+def definir_serie_favorita(guild_id, user_id, slot, serie):
+    """Define (ou limpa, se `serie=None`) a série de um slot - sempre
+    instantâneo (2026-09-03, "remove esse bloqueio" - cooldown de troca
+    removido, `bloqueado_ate` sempre gravado como `None` daqui pra
+    frente, coluna mantida sem migração destrutiva)."""
+    agora = datetime.now(timezone.utc)
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_series_favoritas (guild_id, user_id, slot, serie, trocado_em, bloqueado_ate) "
+            "VALUES (?, ?, ?, ?, ?, NULL) "
+            "ON CONFLICT(guild_id, user_id, slot) DO UPDATE SET "
+            "serie = excluded.serie, trocado_em = excluded.trocado_em, bloqueado_ate = excluded.bloqueado_ate",
+            (str(guild_id), str(user_id), slot, serie, agora.isoformat()),
+        )
+
+
+def nivel_upgrade_slots_serie_favorita(guild_id, user_id):
+    with conexao() as conn:
+        linha = _estado_jogador(conn, guild_id, user_id)
+    return linha["nivel_upgrade_slots_serie_favorita"] if linha else 0
+
+
+def auto_defesa_batalha_ativa(guild_id, user_id):
+    """Auto-Defesa de Batalha (2026-09-02, pedido do usuário) - jogador
+    liga isso pra ser defendido AUTOMATICAMENTE (`batalha.
+    defesa_automatica`, mesma lógica usada pra bots) assim que desafiado,
+    sem precisar esperar nem responder na mão. Desligado por padrão."""
+    with conexao() as conn:
+        linha = _estado_jogador(conn, guild_id, user_id)
+    return bool(linha["auto_defesa_batalha_ativa"]) if linha else False
+
+
+def definir_auto_defesa_batalha(guild_id, user_id, ativa):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador ("
+            "guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, "
+            "auto_defesa_batalha_ativa"
+            ") VALUES (?, ?, 0, ?, 1, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET auto_defesa_batalha_ativa = excluded.auto_defesa_batalha_ativa",
+            (str(guild_id), str(user_id), agora, agora, 1 if ativa else 0),
+        )
+
+
+# 🔥 Teto de slots subiu de 10 pra 25 (2026-09-03, pedido do usuário:
+# "aumente o limite de series para 25 se conseguir") - 25 não foi escolha
+# arbitrária: é o TETO de opções de um único `discord.ui.Select`, então
+# 5 base + 20 níveis de upgrade cabem tudo num select só de escolher slot
+# (ver `paineis._ViewSeriesFavoritas`, que trocou de 1 botão por slot -
+# nunca caberia 25 botões nas 5 linhas do Discord - pra 1 select só).
+# Preço "primeiro palpite" (mesma régua de sempre, barato -> extremamente
+# caro) continuando a curva de crescimento dos 5 primeiros níveis.
+PRECOS_UPGRADE_SLOT_SERIE_FAVORITA = {
+    1: 5_000, 2: 15_000, 3: 40_000, 4: 100_000, 5: 250_000,
+    6: 600_000, 7: 1_400_000, 8: 3_000_000, 9: 6_500_000, 10: 14_000_000,
+    11: 30_000_000, 12: 60_000_000, 13: 125_000_000, 14: 250_000_000, 15: 500_000_000,
+    16: 1_000_000_000, 17: 2_000_000_000, 18: 4_000_000_000, 19: 8_000_000_000, 20: 16_000_000_000,
+}
+SLOTS_BASE_SERIE_FAVORITA = 5
+NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_FAVORITA = 20
+
+
+def comprar_slot_serie_favorita(guild_id, user_id):
+    """Mesmo padrão de `comprar_upgrade_rolls`/`comprar_upgrade_claims` -
+    preço escalonado (`PRECOS_UPGRADE_SLOT_SERIE_FAVORITA`, "primeiro
+    palpite", igual toda constante nova - barato -> extremamente caro,
+    pedido do usuário), 1 slot a mais por nível, `SLOTS_BASE_SERIE_
+    FAVORITA` (5) + até `NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_FAVORITA` (20) =
+    25 slots no total (2026-09-03, "aumente o limite de series para 25
+    se conseguir" - 25 é também o teto de opções de 1 único Select do
+    Discord, por isso esse número específico)."""
+    nivel_atual = nivel_upgrade_slots_serie_favorita(guild_id, user_id)
+    if nivel_atual >= NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_FAVORITA:
+        return False, "Você já tem o número máximo de slots de Série Favorita."
+    proximo_nivel = nivel_atual + 1
+    preco = PRECOS_UPGRADE_SLOT_SERIE_FAVORITA[proximo_nivel]
+    if saldo_wishards(guild_id, user_id) < preco:
+        return False, f"Custa {preco} WiShards e você não tem o suficiente."
+    creditar_wishards(guild_id, user_id, -preco, "upgrade_slot_serie_favorita", f"nivel {proximo_nivel}")
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador ("
+            "guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, "
+            "nivel_upgrade_slots_serie_favorita"
+            ") VALUES (?, ?, 0, ?, 1, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel_upgrade_slots_serie_favorita = excluded.nivel_upgrade_slots_serie_favorita",
+            (str(guild_id), str(user_id), agora, agora, proximo_nivel),
+        )
+    total_slots = SLOTS_BASE_SERIE_FAVORITA + proximo_nivel
+    return True, f"Slot de Série Favorita desbloqueado! {total_slots} slots no total (custou {preco} WiShards)."
+
+
+def salvar_bonus_series_favoritas(guild_id, user_id, bonus_por_serie):
+    """Substitui o snapshot inteiro (`colecao_series_favoritas_bonus`) de
+    uma vez - `bonus_por_serie`: `{serie: {"bonus_percentual",
+    "colecao_completa", "maestria_completa", "soulbond_completo"}}`.
+    DELETE + INSERT (não é hot path, no máximo 10 linhas) - garante que
+    séries que saíram das favoritas não deixam bônus fantasma pra trás."""
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute("DELETE FROM colecao_series_favoritas_bonus WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
+        for serie, dados in bonus_por_serie.items():
+            conn.execute(
+                "INSERT INTO colecao_series_favoritas_bonus "
+                "(guild_id, user_id, serie, bonus_percentual, colecao_completa, maestria_completa, soulbond_completo, atualizado_em) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(guild_id), str(user_id), serie, dados["bonus_percentual"],
+                    int(dados["colecao_completa"]), int(dados["maestria_completa"]), int(dados["soulbond_completo"]), agora,
+                ),
+            )
+
+
+def bonus_series_favoritas(guild_id, user_id):
+    """Leitura BARATA do snapshot (nunca recalcula) - usado por
+    `torre._contexto_lote` no caminho quente. Devolve `{serie:
+    bonus_percentual}` só com `bonus_percentual > 0` (a maioria das séries
+    favoritadas ainda não tem nenhum marco completo)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT serie, bonus_percentual FROM colecao_series_favoritas_bonus "
+            "WHERE guild_id = ? AND user_id = ? AND bonus_percentual > 0",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {r["serie"]: r["bonus_percentual"] for r in linhas}
 
 
 # --------------------------------------------------------------------------
@@ -1072,7 +1884,7 @@ def incrementar_afinidade(guild_id, user_id, personagem_id):
 
 def personagens_prontas_para_prova(guild_id, user_id):
     """Candidatas à Prova de Soulmate: Afinidade 10 E ainda não é Soulmate -
-    alimenta o select do botão "💞 Prova de Soulmate" do hub `/waifu` (ver
+    alimenta o select do botão "💞 Prova de Soulmate" do hub `/pandora` (ver
     `pandora/paineis.py::ViewHubWaifu`)."""
     with conexao() as conn:
         linhas = conn.execute(
@@ -1755,6 +2567,68 @@ def tempo_restante(guild_id, user_id, coluna_restante, coluna_reset, limite, jan
 
 
 # --------------------------------------------------------------------------
+# Recompensa Diária (2026-09-02, pedido do usuário - Seção 6/29 do plano
+# original: "eventual recompensa diária") - reset por DIA DE CALENDÁRIO em
+# UTC, diferente de rolls/claims (janela rolante fixa em minutos) - dá pra
+# resgatar de novo a partir da meia-noite UTC, não 24h exatas depois do
+# último clique.
+# --------------------------------------------------------------------------
+
+RECOMPENSA_DIARIA_WISHARDS = 150  # valor POR NÍVEL de Progressão (2026-09-02, pedido do usuário: "multiplicada os wishards pelo nivel da progressao") - fica pra balanceamento, como o resto
+
+
+def diaria_disponivel(guild_id, user_id):
+    """True se o jogador ainda não resgatou a Recompensa Diária HOJE (data
+    de calendário em UTC) - nunca ter resgatado (linha/coluna None) conta
+    como disponível."""
+    with conexao() as conn:
+        linha = _estado_jogador(conn, guild_id, user_id)
+    if linha is None or linha["diaria_reivindicada_em"] is None:
+        return True
+    ultima = datetime.fromisoformat(linha["diaria_reivindicada_em"])
+    return ultima.date() < datetime.now(timezone.utc).date()
+
+
+def reivindicar_diaria(guild_id, user_id):
+    """Marca a Recompensa Diária como resgatada HOJE - devolve False sem
+    escrever nada se já tiver sido resgatada hoje (checagem por DENTRO da
+    mesma conexão/transação de `diaria_disponivel`, não só a leitura solta
+    - evita 2 cliques quase simultâneos concedendo 2x)."""
+    agora = datetime.now(timezone.utc)
+    with conexao() as conn:
+        linha = _estado_jogador(conn, guild_id, user_id)
+        if linha is not None and linha["diaria_reivindicada_em"] is not None:
+            if datetime.fromisoformat(linha["diaria_reivindicada_em"]).date() >= agora.date():
+                return False
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador "
+            "(guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, diaria_reivindicada_em) "
+            "VALUES (?, ?, 0, ?, 0, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET diaria_reivindicada_em = excluded.diaria_reivindicada_em",
+            (str(guild_id), str(user_id), agora.isoformat(), agora.isoformat(), agora.isoformat()),
+        )
+    return True
+
+
+def reivindicar_diaria_com_recompensa(guild_id, user_id):
+    """Resgata a Recompensa Diária + credita `RECOMPENSA_DIARIA_WISHARDS ×
+    nível de Progressão` em WiShards (2026-09-02, pedido do usuário:
+    "multiplicada os wishards pelo nivel da progressao" - Progressão é
+    SEM TETO, `db.progressao_conta`, então o valor da Diária cresce junto
+    com a conta em vez de ficar defasado pra sempre nos 150 originais).
+    Devolve (ok, novo_saldo_ou_None, wishards_creditados) - `ok=False` = já
+    resgatou hoje, não credita nada de novo (`wishards_creditados=0`). O
+    item raro (Seção "e da 1 item raro") é concedido por quem chama
+    (`paineis._diaria`), não aqui - `db.py` não importa `pandora.itens`."""
+    if not reivindicar_diaria(guild_id, user_id):
+        return False, None, 0
+    nivel = progressao_conta(guild_id, user_id)["nivel"]
+    wishards = RECOMPENSA_DIARIA_WISHARDS * nivel
+    novo_saldo = creditar_wishards(guild_id, user_id, wishards, "diaria")
+    return True, novo_saldo, wishards
+
+
+# --------------------------------------------------------------------------
 # Séries bloqueadas por servidor (Seção 21)
 # --------------------------------------------------------------------------
 
@@ -1814,6 +2688,200 @@ def eh_favorita(guild_id, user_id, personagem_id):
     return linha is not None
 
 
+def favoritos_listar(guild_id, user_id):
+    """Personagens marcadas como favorita por esse jogador (2026-09-02,
+    pedido do usuário: "quero q tenha uma lista com meus personagens
+    favoritos, assim como tem so de personagens") - mesmo formato de
+    `colecao_do_usuario` (afinidade/soulmate inclusos, pra `consulta.
+    linha_personagem` mostrar igual à Coleção), só filtrado pelas
+    marcadas em `colecao_favoritas`. Ordenado por popularidade DESC,
+    mesmo critério de `wishlist_listar` (sem CP de vínculo aqui, é lista
+    simples de exibição)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.*, c.reivindicado_em, COALESCE(a.afinidade, 1) AS afinidade, "
+            "COALESCE(a.is_soulmate, 0) AS is_soulmate "
+            "FROM colecao_favoritas f "
+            "JOIN colecao_personagens p ON p.id = f.personagem_id "
+            "JOIN colecao_propriedade c ON c.guild_id = f.guild_id AND c.dono_id = f.user_id AND c.personagem_id = f.personagem_id "
+            "LEFT JOIN colecao_afinidade a "
+            "  ON a.guild_id = f.guild_id AND a.user_id = f.user_id AND a.personagem_id = f.personagem_id "
+            "WHERE f.guild_id = ? AND f.user_id = ? "
+            "ORDER BY p.popularidade DESC",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+        return [dict(r) for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Tags pessoais por personagem (2026-09-01) - "trade" é a 1ª usada
+# --------------------------------------------------------------------------
+
+def definir_tag(guild_id, user_id, personagem_id, tag):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO colecao_tags (guild_id, user_id, personagem_id, tag) VALUES (?, ?, ?, ?)",
+            (str(guild_id), str(user_id), personagem_id, tag),
+        )
+
+
+def remover_tag(guild_id, user_id, personagem_id, tag):
+    with conexao() as conn:
+        conn.execute(
+            "DELETE FROM colecao_tags WHERE guild_id = ? AND user_id = ? AND personagem_id = ? AND tag = ?",
+            (str(guild_id), str(user_id), personagem_id, tag),
+        )
+
+
+def tags_do_personagem(guild_id, user_id, personagem_id):
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT tag FROM colecao_tags WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
+            (str(guild_id), str(user_id), personagem_id),
+        ).fetchall()
+    return [r["tag"] for r in linhas]
+
+
+def colecao_por_tag(guild_id, user_id, tag):
+    """Personagens da coleção do jogador marcadas com essa tag (ex.:
+    "trade", ver `gacha.processar_reacao_claim`) - usado pro filtro
+    "🏷️ Tags" do hub, ordenado por popularidade (mesmo critério simples de
+    `wishlist_listar`, sem contexto de vínculo)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.* FROM colecao_tags t JOIN colecao_personagens p ON p.id = t.personagem_id "
+            "WHERE t.guild_id = ? AND t.user_id = ? AND t.tag = ? ORDER BY p.popularidade DESC",
+            (str(guild_id), str(user_id), tag),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Batalha 5x5 com Aposta de Personagem (2026-09-01) - CRUD puro, regra de
+# negócio (validação/cálculo/resolução) mora em `pandora.batalha`.
+# --------------------------------------------------------------------------
+
+def batalha_ativa_do_jogador(guild_id, user_id):
+    """Desafio NÃO terminal (nem 'concluida' nem 'cancelada') onde esse
+    jogador é desafiante OU defensor - usado pra "1 batalha por vez" e pro
+    hub "⚔️ Batalha" saber o que mostrar. `None` se não tiver nenhum."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT * FROM colecao_batalha_desafios WHERE guild_id = ? "
+            "AND status NOT IN ('concluida', 'cancelada') "
+            "AND (desafiante_id = ? OR defensor_id = ?) "
+            "ORDER BY id DESC LIMIT 1",
+            (str(guild_id), str(user_id), str(user_id)),
+        ).fetchone()
+    return dict(linha) if linha else None
+
+
+def batalha_por_id(desafio_id):
+    with conexao() as conn:
+        linha = conn.execute("SELECT * FROM colecao_batalha_desafios WHERE id = ?", (desafio_id,)).fetchone()
+    return dict(linha) if linha else None
+
+
+def criar_desafio_batalha(guild_id, desafiante_id, defensor_id, personagem_id, aposta_wishards, ordem_desafiante, canal_id=None):
+    """`canal_id` (2026-09-02, Auto-Defesa) - onde o desafio nasceu, pro
+    `batalha.SchedulerBatalha` saber onde postar o resultado se o defensor
+    nunca responder e o auto-resolve de 10min entrar em ação."""
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        cursor = conn.execute(
+            "INSERT INTO colecao_batalha_desafios ("
+            "guild_id, canal_id, desafiante_id, defensor_id, personagem_id, aposta_wishards, ordem_desafiante, criado_em"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(guild_id), str(canal_id) if canal_id else None, str(desafiante_id), str(defensor_id),
+                personagem_id, aposta_wishards, json.dumps(ordem_desafiante), agora,
+            ),
+        )
+        return cursor.lastrowid
+
+
+def definir_ordem_defensor(desafio_id, ordem_defensor):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_batalha_desafios SET ordem_defensor = ?, status = 'em_andamento' WHERE id = ?",
+            (json.dumps(ordem_defensor), desafio_id),
+        )
+
+
+def finalizar_desafio_batalha(desafio_id, placar_desafiante, placar_defensor):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_batalha_desafios SET placar_desafiante = ?, placar_defensor = ?, "
+            "status = 'concluida', resolvido_em = ? WHERE id = ?",
+            (placar_desafiante, placar_defensor, datetime.now(timezone.utc).isoformat(), desafio_id),
+        )
+
+
+def cancelar_desafio_batalha(desafio_id):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_batalha_desafios SET status = 'cancelada', resolvido_em = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), desafio_id),
+        )
+
+
+def cooldown_batalha_ok(guild_id, desafiante_id, defensor_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT ultimo_desafio_em FROM colecao_batalha_cooldown WHERE guild_id = ? "
+            "AND desafiante_id = ? AND defensor_id = ?",
+            (str(guild_id), str(desafiante_id), str(defensor_id)),
+        ).fetchone()
+    if linha is None:
+        return True
+    ultimo = datetime.fromisoformat(linha["ultimo_desafio_em"])
+    return (datetime.now(timezone.utc) - ultimo) >= timedelta(hours=24)
+
+
+def registrar_desafio_cooldown(guild_id, desafiante_id, defensor_id):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_batalha_cooldown (guild_id, desafiante_id, defensor_id, ultimo_desafio_em) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, desafiante_id, defensor_id) "
+            "DO UPDATE SET ultimo_desafio_em = excluded.ultimo_desafio_em",
+            (str(guild_id), str(desafiante_id), str(defensor_id), agora),
+        )
+
+
+def defesas_hoje(guild_id, defensor_id):
+    hoje = datetime.now(timezone.utc).date().isoformat()
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT quantidade FROM colecao_batalha_defesas_hoje WHERE guild_id = ? AND defensor_id = ? AND data = ?",
+            (str(guild_id), str(defensor_id), hoje),
+        ).fetchone()
+    return linha["quantidade"] if linha else 0
+
+
+def registrar_defesa_hoje(guild_id, defensor_id):
+    hoje = datetime.now(timezone.utc).date().isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_batalha_defesas_hoje (guild_id, defensor_id, data, quantidade) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(guild_id, defensor_id, data) DO UPDATE SET quantidade = quantidade + 1",
+            (str(guild_id), str(defensor_id), hoje),
+        )
+
+
+def desafios_batalha_expirados(guild_id, limite_iso):
+    """IDs de desafios 'aguardando_defensor' criados ANTES de `limite_iso`
+    (defensor nunca respondeu) - usado por `paineis.SchedulerBatalha`
+    (2026-09-02, Auto-Defesa por timeout de 10min, substitui o
+    cancelamento por inatividade de 24h que existia antes - agora
+    RESOLVE o desafio sozinho em vez de só cancelar)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT id FROM colecao_batalha_desafios WHERE guild_id = ? "
+            "AND status = 'aguardando_defensor' AND criado_em <= ?",
+            (str(guild_id), limite_iso),
+        ).fetchall()
+    return [r["id"] for r in linhas]
 
 
 # --------------------------------------------------------------------------
@@ -1824,36 +2892,67 @@ def eh_favorita(guild_id, user_id, personagem_id):
 # job/cron varrendo a tabela sozinho).
 # --------------------------------------------------------------------------
 
-def registrar_card_pendente(guild_id, message_id, personagem_id, emoji, expira_em_iso):
+def registrar_card_pendente(guild_id, message_id, personagem_id, emoji, expira_em_iso, acao="claim"):
+    """`acao` ("claim"/"favoritar", 2026-09-01) - até 2 linhas por
+    `message_id`, uma por emoji válido nesse card. `processar_reacao_
+    claim` decide o que fazer depois do claim com base nisso. Pra
+    registrar MAIS de um emoji do mesmo card de uma vez (o caso comum),
+    usar `registrar_cards_pendentes` (1 conexão só, em vez de 1 por
+    emoji)."""
     with conexao() as conn:
         conn.execute(
-            "INSERT INTO colecao_cards_pendentes (message_id, guild_id, personagem_id, emoji, expira_em) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(message_id) DO UPDATE SET expira_em = excluded.expira_em",
-            (str(message_id), str(guild_id), personagem_id, emoji, expira_em_iso),
+            "INSERT INTO colecao_cards_pendentes (message_id, emoji, guild_id, personagem_id, acao, expira_em) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(message_id, emoji) DO UPDATE SET expira_em = excluded.expira_em",
+            (str(message_id), emoji, str(guild_id), personagem_id, acao, expira_em_iso),
         )
+
+
+def registrar_cards_pendentes(guild_id, message_id, personagem_id, itens_emoji_acao, expira_em_iso):
+    """Versão em LOTE de `registrar_card_pendente` (2026-09-01, achado do
+    usuário: "tem como melhorar a velocidade de aparição das
+    personagens?") - `itens_emoji_acao` é `[(emoji, acao), ...]` - grava
+    TODAS as linhas numa ÚNICA conexão/transação, em vez de abrir uma
+    conexão SQLite nova por emoji (2 aberturas viravam 2 antes; pra um
+    roll de 50 isso é 100 conexões a mais só nessa parte)."""
+    with conexao() as conn:
+        for emoji, acao in itens_emoji_acao:
+            conn.execute(
+                "INSERT INTO colecao_cards_pendentes (message_id, emoji, guild_id, personagem_id, acao, expira_em) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(message_id, emoji) DO UPDATE SET expira_em = excluded.expira_em",
+                (str(message_id), emoji, str(guild_id), personagem_id, acao, expira_em_iso),
+            )
 
 
 def _limpar_cards_expirados(conn, agora_iso):
     conn.execute("DELETE FROM colecao_cards_pendentes WHERE expira_em <= ?", (agora_iso,))
 
 
-def card_pendente_por_mensagem(message_id):
+def card_pendente_por_mensagem(message_id, emoji):
     """Usado por `gacha.processar_reacao_claim` - devolve {"guild_id",
-    "personagem_id", "emoji", "expira_em"} ou None (nunca existiu, já foi
-    reivindicado, ou expirou - os 3 casos tratados como "ignora essa
-    reação", igual o comportamento antigo em memória)."""
+    "personagem_id", "emoji", "acao", "expira_em"} ou None (nunca existiu
+    ESSE emoji nessa mensagem - reação aleatória de alguém, ou já foi
+    reivindicado, ou expirou - todos tratados como "ignora essa reação",
+    igual antes). Filtrar pelo `emoji` exato (2026-09-01) substitui a
+    checagem manual que `processar_reacao_claim` fazia depois de buscar só
+    por `message_id` - agora cada emoji da mesma mensagem é uma linha
+    própria (claim/favoritar/trocar)."""
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         _limpar_cards_expirados(conn, agora)
         linha = conn.execute(
-            "SELECT guild_id, personagem_id, emoji, expira_em FROM colecao_cards_pendentes WHERE message_id = ?",
-            (str(message_id),),
+            "SELECT guild_id, personagem_id, emoji, acao, expira_em FROM colecao_cards_pendentes "
+            "WHERE message_id = ? AND emoji = ?",
+            (str(message_id), emoji),
         ).fetchone()
     return dict(linha) if linha else None
 
 
 def remover_card_pendente(message_id):
+    """Remove TODAS as variantes de emoji dessa mensagem (claim/favoritar/
+    trocar) - depois de resolvida (por qualquer uma delas), as outras 2
+    reações no mesmo card deixam de valer."""
     with conexao() as conn:
         conn.execute("DELETE FROM colecao_cards_pendentes WHERE message_id = ?", (str(message_id),))
 
@@ -1870,6 +2969,12 @@ def cards_pendentes(guild_id, raridade=None):
     agora = datetime.now(timezone.utc).isoformat()
     filtros = [
         "c.guild_id = ?",
+        # 🔥 `acao = 'claim'` (2026-09-01) - com favoritar/trocar também
+        # gravando linha própria pra mesma mensagem/personagem, sem esse
+        # filtro cada card apareceria até 3x aqui (1 por emoji); "claim"
+        # sempre existe pra todo card "livre" (ver `gacha.
+        # enviar_cards_individuais`), então filtrar por ele já deduplica.
+        "c.acao = 'claim'",
         "NOT EXISTS (SELECT 1 FROM colecao_propriedade o WHERE o.guild_id = c.guild_id AND o.personagem_id = c.personagem_id)",
     ]
     params = [str(guild_id)]
@@ -2166,6 +3271,46 @@ def nivel_em_lote(guild_id, user_id):
     return {linha["personagem_id"]: linha["nivel"] for linha in linhas}
 
 
+def info_classes_em_lote(guild_id, user_id):
+    """{classe: (bonus_cp_classe, categoria_combate, funcao_cidade)} de
+    TODA classe que o jogador possui NESSE servidor, numa query só
+    (2026-09-01, achado do usuário: "Quando fui upar level apenas de 1
+    personagem para o maximo, gaia nao respondeu a tempo") - `torre.
+    power_personagem` já cacheava `bonus_cp_classe`/`categoria_combate_
+    da_classe` DURANTE o loop (2 por classe NOVA encontrada), mas isso
+    ainda abria 1 conexão SQLite por classe distinta (`quantidade_
+    possuida_da_classe`/`categoria_combate_da_classe`, `conexao()` não
+    faz pool) - pra uma coleção com muitas classes diferentes, isso
+    sozinho já dominava o tempo de `cidade._workforce_por_funcao` (2,7s
+    pra ~1.100 personagens/49 classes, quase tudo em conexões repetidas).
+    `funcao_cidade` (2026-09-01, mesmo achado) - `cidade._workforce_por_
+    funcao` chamava `db.funcao_cidade_da_classe` por PERSONAGEM (não só
+    por classe), pior ainda que os outros 2; incluído aqui pra também
+    virar cache em vez de 1 conexão por personagem. Esta função pré-
+    calcula TUDO numa única query (`GROUP BY` + `JOIN` com `colecao_
+    classes`), preenchendo o cache de `torre._contexto_lote` de uma vez -
+    zero conexão extra por classe/personagem depois disso."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.classe AS classe, cc.categoria_combate AS categoria_combate, "
+            "cc.funcao_cidade AS funcao_cidade, COUNT(*) AS quantidade "
+            "FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "LEFT JOIN colecao_classes cc ON cc.classe = p.classe "
+            "WHERE c.guild_id = ? AND c.dono_id = ? AND p.classe IS NOT NULL "
+            "GROUP BY p.classe",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {
+        linha["classe"]: (
+            (linha["quantidade"] // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE,
+            linha["categoria_combate"],
+            linha["funcao_cidade"],
+        )
+        for linha in linhas
+    }
+
+
 def quantidade_possuida_da_classe(guild_id, user_id, classe):
     """Quantas personagens DESSA classe (taxonomia aberta) o jogador
     possui NESSE servidor - base do bônus por classe."""
@@ -2186,6 +3331,47 @@ def bonus_cp_classe(guild_id, user_id, classe):
         return 0
     quantidade = quantidade_possuida_da_classe(guild_id, user_id, classe)
     return (quantidade // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE
+
+
+def bonus_classes_por_categoria(guild_id, user_id):
+    """Detalhe do bônus por classe agrupado por categoria de combate
+    (2026-09-02, pedido do usuário: "uma nova tela q mostrasse q DPS ta
+    ganhando +X Tank +Y... e n sei se separou por classe tbm") - devolve
+    {categoria: {"total_bonus": int, "total_personagens": int, "classes":
+    [{"classe", "quantidade", "bonus", "proximo_marco"}, ...]}}, só com
+    classes que o jogador possui NESSE servidor (classe sem `categoria_
+    combate` cadastrada em `colecao_classes` cai em "Sem categoria").
+    `total_bonus` é a SOMA do bônus de cada classe da categoria (não
+    multiplicado pela quantidade de cada uma) - decisão explícita do
+    usuário depois de eu explicar que não existe um "+X do DPS" físico de
+    verdade (cada personagem só ganha o bônus da PRÓPRIA classe, nunca o
+    das outras classes da mesma categoria) - o número é só a soma dos
+    bônus vigentes agrupados, não um valor que se aplica a cada unidade."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.classe AS classe, cc.categoria_combate AS categoria_combate, COUNT(*) AS quantidade "
+            "FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "LEFT JOIN colecao_classes cc ON cc.classe = p.classe "
+            "WHERE c.guild_id = ? AND c.dono_id = ? AND p.classe IS NOT NULL "
+            "GROUP BY p.classe",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    categorias = {}
+    for linha in linhas:
+        categoria = linha["categoria_combate"] or "Sem categoria"
+        quantidade = linha["quantidade"]
+        bonus = (quantidade // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE
+        proximo_marco = (quantidade // MARCO_QUANTIDADE_CLASSE + 1) * MARCO_QUANTIDADE_CLASSE
+        entrada = categorias.setdefault(categoria, {"total_bonus": 0, "total_personagens": 0, "classes": []})
+        entrada["total_bonus"] += bonus
+        entrada["total_personagens"] += quantidade
+        entrada["classes"].append(
+            {"classe": linha["classe"], "quantidade": quantidade, "bonus": bonus, "proximo_marco": proximo_marco}
+        )
+    for entrada in categorias.values():
+        entrada["classes"].sort(key=lambda c: c["bonus"], reverse=True)
+    return categorias
 
 
 def custo_treinamento_global(nivel_alvo):
@@ -2275,8 +3461,16 @@ def checar_marcos_colecao(guild_id, user_id):
     novos pagos AGORA (vazia se nenhum). Chamado a cada claim bem-
     sucedido (`gacha.py`) - `maior_marco` guardado garante que nunca paga
     2x o mesmo marco, mesmo se a coleção oscilar perto dele (Merge reduz
-    contagem, por exemplo)."""
-    total = len(colecao_do_usuario(guild_id, user_id))
+    contagem, por exemplo).
+
+    🔥 `contar_colecao_do_usuario` (2026-09-01) em vez de `len(colecao_do_
+    usuario(...))` - só precisa do NÚMERO, nunca materializar a coleção
+    inteira (JOIN + 1 dict por linha) só pra jogar fora e contar; isso
+    rodava em TODO claim (via `gacha._processar_claim`, sem `to_thread`),
+    achado do usuário: "qnd eu dou claim pelos botoes... da GAIA não
+    respondeu a tempo" - claim por BOTÃO tem prazo de 3s pra responder
+    (claim por REAÇÃO não, daí só aparecer nesse caminho)."""
+    total = contar_colecao_do_usuario(guild_id, user_id)
     ja_pago = maior_marco_colecao_atingido(guild_id, user_id)
     novos = [m for m in MARCOS_COLECAO if ja_pago < m <= total]
     if not novos:
@@ -2452,3 +3646,674 @@ def comprar_upgrade_claims(guild_id, user_id):
         )
     bonus_total = proximo_nivel * BONUS_CLAIMS_POR_NIVEL
     return True, f"Upgrade de claims nível {proximo_nivel}! +{bonus_total} claim(s) por ciclo, pra sempre (custou {preco} WiShards)."
+
+
+# --------------------------------------------------------------------------
+# World Boss (2026-09-01) - CRUD puro, regra de negócio (mecânicas/turnos/
+# scheduler) mora em `pandora.worldboss`.
+# --------------------------------------------------------------------------
+
+def worldboss_criar_evento(
+    guild_id, canal_id, boss_tipo, boss_hp_maximo, boss_atk_base, estado_mecanica, inscricoes_fecham_em,
+    dificuldade=None, cp_recomendado=None,
+):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        cursor = conn.execute(
+            "INSERT INTO colecao_worldboss_eventos ("
+            "guild_id, canal_id, boss_tipo, boss_hp_maximo, boss_hp_atual, boss_atk_base, boss_atk_atual, "
+            "estado_mecanica, dificuldade, cp_recomendado, criado_em, inscricoes_fecham_em"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(guild_id), str(canal_id) if canal_id else None, boss_tipo, boss_hp_maximo, boss_hp_maximo,
+                boss_atk_base, boss_atk_base, json.dumps(estado_mecanica), dificuldade, cp_recomendado,
+                agora, inscricoes_fecham_em,
+            ),
+        )
+        return cursor.lastrowid
+
+
+def worldboss_evento_por_id(evento_id):
+    with conexao() as conn:
+        linha = conn.execute("SELECT * FROM colecao_worldboss_eventos WHERE id = ?", (evento_id,)).fetchone()
+    return dict(linha) if linha else None
+
+
+def worldboss_evento_ativo(guild_id):
+    """Evento NÃO terminal (inscrições ou em combate) desse servidor -
+    "cada aparição inicia um evento independente", nunca 2 ao mesmo tempo
+    no mesmo servidor."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT * FROM colecao_worldboss_eventos WHERE guild_id = ? "
+            "AND status NOT IN ('vitoria', 'derrota', 'expirado_por_turnos', 'cancelado_sem_participantes') "
+            "ORDER BY id DESC LIMIT 1",
+            (str(guild_id),),
+        ).fetchone()
+    return dict(linha) if linha else None
+
+
+def worldboss_eventos_com_inscricoes_vencidas(agora_iso):
+    """TODOS os servidores - usado pelo tick do scheduler (30s), que
+    resolve fechamento de inscrições sem precisar saber de guild nenhuma
+    de antemão."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT id FROM colecao_worldboss_eventos WHERE status = 'inscricoes' AND inscricoes_fecham_em <= ?",
+            (agora_iso,),
+        ).fetchall()
+    return [r["id"] for r in linhas]
+
+
+def worldboss_eventos_com_turno_pendente(agora_iso):
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT id FROM colecao_worldboss_eventos WHERE status = 'em_combate' AND proximo_turno_em <= ?",
+            (agora_iso,),
+        ).fetchall()
+    return [r["id"] for r in linhas]
+
+
+def worldboss_iniciar_combate(evento_id, time_hp_maximo, time_dano_turno, time_cura_turno, estado_mecanica, proximo_turno_em):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_worldboss_eventos SET status = 'em_combate', time_hp_maximo = ?, time_hp_atual = ?, "
+            "time_dano_turno = ?, time_cura_turno = ?, estado_mecanica = ?, proximo_turno_em = ? WHERE id = ?",
+            (
+                time_hp_maximo, time_hp_maximo, time_dano_turno, time_cura_turno,
+                json.dumps(estado_mecanica), proximo_turno_em, evento_id,
+            ),
+        )
+
+
+def worldboss_atualizar_turno(evento_id, turno_atual, boss_hp_atual, boss_atk_atual, time_hp_atual, estado_mecanica, proximo_turno_em):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_worldboss_eventos SET turno_atual = ?, boss_hp_atual = ?, boss_atk_atual = ?, "
+            "time_hp_atual = ?, estado_mecanica = ?, proximo_turno_em = ? WHERE id = ?",
+            (turno_atual, boss_hp_atual, boss_atk_atual, time_hp_atual, json.dumps(estado_mecanica), proximo_turno_em, evento_id),
+        )
+
+
+def worldboss_finalizar(evento_id, status):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_worldboss_eventos SET status = ?, concluido_em = ? WHERE id = ?",
+            (status, datetime.now(timezone.utc).isoformat(), evento_id),
+        )
+
+
+def worldboss_definir_participante(evento_id, user_id, personagem_id, categoria, categorias_selecionadas, cp, origem):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_worldboss_participantes ("
+            "evento_id, user_id, personagem_id, categoria, categorias_selecionadas, cp, origem, entrou_em"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(evento_id, user_id) DO UPDATE SET personagem_id = excluded.personagem_id, "
+            "categoria = excluded.categoria, categorias_selecionadas = excluded.categorias_selecionadas, "
+            "cp = excluded.cp, origem = excluded.origem",
+            (evento_id, str(user_id), personagem_id, categoria, json.dumps(categorias_selecionadas), cp, origem, agora),
+        )
+
+
+def worldboss_remover_participante(evento_id, user_id):
+    with conexao() as conn:
+        conn.execute(
+            "DELETE FROM colecao_worldboss_participantes WHERE evento_id = ? AND user_id = ?",
+            (evento_id, str(user_id)),
+        )
+
+
+def worldboss_participante(evento_id, user_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT * FROM colecao_worldboss_participantes WHERE evento_id = ? AND user_id = ?",
+            (evento_id, str(user_id)),
+        ).fetchone()
+    return dict(linha) if linha else None
+
+
+def worldboss_participantes(evento_id):
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT * FROM colecao_worldboss_participantes WHERE evento_id = ?", (evento_id,),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+def worldboss_auto_ativo(guild_id, user_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT ativo, categorias FROM colecao_worldboss_auto WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    if linha is None:
+        return False, ["DPS", "Tank", "Support"]
+    return bool(linha["ativo"]), json.loads(linha["categorias"])
+
+
+def worldboss_definir_auto(guild_id, user_id, ativo, categorias):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_worldboss_auto (guild_id, user_id, ativo, categorias) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET ativo = excluded.ativo, categorias = excluded.categorias",
+            (str(guild_id), str(user_id), 1 if ativo else 0, json.dumps(categorias)),
+        )
+
+
+def worldboss_usuarios_auto_ativos(guild_id):
+    """(user_id, categorias) de quem tem Entrada Automática ligada nesse
+    servidor - usado só DEPOIS que as inscrições manuais encerram (Seção
+    8/10), pra quem ainda não tem participação registrada nesse evento."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT user_id, categorias FROM colecao_worldboss_auto WHERE guild_id = ? AND ativo = 1",
+            (str(guild_id),),
+        ).fetchall()
+    return [(r["user_id"], json.loads(r["categorias"])) for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Conquistas (2026-09-01) - registro puro, nunca concede recompensa.
+# --------------------------------------------------------------------------
+
+def conceder_conquista(guild_id, user_id, conquista_id):
+    """Devolve True se era NOVA (nunca desbloqueada antes nesse servidor) -
+    `False` se já tinha, pra quem chama saber se deve anunciar "NOVA
+    CONQUISTA" ou ficar quieto (idempotente - seguro chamar toda vez que a
+    condição bater de novo, ex.: "Caçador" checado em toda vitória)."""
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO colecao_conquistas (guild_id, user_id, conquista_id, desbloqueada_em) VALUES (?, ?, ?, ?)",
+            (str(guild_id), str(user_id), conquista_id, agora),
+        )
+        return cursor.rowcount > 0
+
+
+def conquistas_do_jogador(guild_id, user_id):
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT conquista_id, desbloqueada_em FROM colecao_conquistas WHERE guild_id = ? AND user_id = ? ORDER BY desbloqueada_em",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+def contar_vitorias_worldboss(guild_id, user_id):
+    """Quantas vitórias de World Boss esse jogador já PARTICIPOU nesse
+    servidor - inclui a que acabou de terminar, se `db.worldboss_
+    finalizar` já rodou antes desta chamada (ordem que `pandora.worldboss.
+    processar_vitoria` respeita)."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_worldboss_participantes p "
+            "JOIN colecao_worldboss_eventos e ON e.id = p.evento_id "
+            "WHERE e.guild_id = ? AND p.user_id = ? AND e.status = 'vitoria'",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    return linha["n"]
+
+
+# --------------------------------------------------------------------------
+# Inventário de itens (2026-09-01)
+# --------------------------------------------------------------------------
+
+def adicionar_item(guild_id, user_id, item, quantidade=1):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_inventario (guild_id, user_id, item, quantidade) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id, item) DO UPDATE SET quantidade = quantidade + excluded.quantidade",
+            (str(guild_id), str(user_id), item, quantidade),
+        )
+
+
+def quantidade_item(guild_id, user_id, item):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT quantidade FROM colecao_inventario WHERE guild_id = ? AND user_id = ? AND item = ?",
+            (str(guild_id), str(user_id), item),
+        ).fetchone()
+    return linha["quantidade"] if linha else 0
+
+
+def consumir_item(guild_id, user_id, item, quantidade=1):
+    """Devolve True/False - só desconta se tiver o suficiente (nunca vai
+    negativo)."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT quantidade FROM colecao_inventario WHERE guild_id = ? AND user_id = ? AND item = ?",
+            (str(guild_id), str(user_id), item),
+        ).fetchone()
+        if linha is None or linha["quantidade"] < quantidade:
+            return False
+        conn.execute(
+            "UPDATE colecao_inventario SET quantidade = quantidade - ? WHERE guild_id = ? AND user_id = ? AND item = ?",
+            (quantidade, str(guild_id), str(user_id), item),
+        )
+        return True
+
+
+def itens_do_jogador(guild_id, user_id):
+    """{item: quantidade} só com quantidade > 0."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT item, quantidade FROM colecao_inventario WHERE guild_id = ? AND user_id = ? AND quantidade > 0",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {r["item"]: r["quantidade"] for r in linhas}
+
+
+# --------------------------------------------------------------------------
+# Proteção PvP (2026-09-01, item "Proteção", Seção 7)
+# --------------------------------------------------------------------------
+
+def aplicar_protecao_pvp(guild_id, user_id, personagem_id):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO colecao_protecao_pvp (guild_id, user_id, personagem_id, aplicada_em) VALUES (?, ?, ?, ?)",
+            (str(guild_id), str(user_id), personagem_id, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def remover_protecao_pvp(guild_id, user_id, personagem_id):
+    with conexao() as conn:
+        conn.execute(
+            "DELETE FROM colecao_protecao_pvp WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
+            (str(guild_id), str(user_id), personagem_id),
+        )
+
+
+def esta_protegida_pvp(guild_id, user_id, personagem_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT 1 FROM colecao_protecao_pvp WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
+            (str(guild_id), str(user_id), personagem_id),
+        ).fetchone()
+    return linha is not None
+
+
+def personagens_protegidas_pvp(guild_id, user_id):
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT personagem_id FROM colecao_protecao_pvp WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return [r["personagem_id"] for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Personagens perdidas na Batalha 5x5 (2026-09-01, item "Revanche", Seção 8)
+# --------------------------------------------------------------------------
+
+def registrar_personagem_perdida(guild_id, personagem_id, jogador_perdedor_id):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_batalha_personagens_perdidas (guild_id, personagem_id, jogador_perdedor_id, perdida_em, recuperada) "
+            "VALUES (?, ?, ?, ?, 0) "
+            "ON CONFLICT(guild_id, personagem_id, jogador_perdedor_id) DO UPDATE SET "
+            "perdida_em = excluded.perdida_em, recuperada = 0",
+            (str(guild_id), personagem_id, str(jogador_perdedor_id), datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def personagem_perdida_por(guild_id, personagem_id, jogador_perdedor_id):
+    """`True` se `jogador_perdedor_id` perdeu ESSA personagem numa Batalha
+    5x5 e ainda não recuperou de volta - usado pra validar o item
+    Revanche (só pode ser usado contra uma personagem que você realmente
+    perdeu daquele jeito)."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT 1 FROM colecao_batalha_personagens_perdidas WHERE guild_id = ? AND personagem_id = ? "
+            "AND jogador_perdedor_id = ? AND recuperada = 0",
+            (str(guild_id), personagem_id, str(jogador_perdedor_id)),
+        ).fetchone()
+    return linha is not None
+
+
+def marcar_personagem_recuperada(guild_id, personagem_id, jogador_perdedor_id):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_batalha_personagens_perdidas SET recuperada = 1 "
+            "WHERE guild_id = ? AND personagem_id = ? AND jogador_perdedor_id = ?",
+            (str(guild_id), personagem_id, str(jogador_perdedor_id)),
+        )
+
+
+def personagens_perdidas_recuperaveis(guild_id, jogador_perdedor_id):
+    """Personagens que esse jogador perdeu numa Batalha 5x5 e ainda não
+    recuperou - usado pro item ⚔️ Revanche (painel "🎒 Inventário" lista
+    isso pra escolher contra qual desafiar de novo)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.* FROM colecao_batalha_personagens_perdidas b "
+            "JOIN colecao_personagens p ON p.id = b.personagem_id "
+            "WHERE b.guild_id = ? AND b.jogador_perdedor_id = ? AND b.recuperada = 0",
+            (str(guild_id), str(jogador_perdedor_id)),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Chave da Torre (2026-09-01, Seção 9)
+# --------------------------------------------------------------------------
+
+def definir_chave_torre_ativa(guild_id, user_id, ativa):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_torre_chave_ativa (guild_id, user_id, ativa) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET ativa = excluded.ativa",
+            (str(guild_id), str(user_id), 1 if ativa else 0),
+        )
+
+
+def chave_torre_ativa(guild_id, user_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT ativa FROM colecao_torre_chave_ativa WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    return bool(linha["ativa"]) if linha else False
+
+
+# --------------------------------------------------------------------------
+# Construções da Cidade (2026-09-01, item "Upgrade de Construção", Seção 10)
+# --------------------------------------------------------------------------
+
+def nivel_construcao(guild_id, user_id, area):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT nivel FROM colecao_construcoes WHERE guild_id = ? AND user_id = ? AND area = ?",
+            (str(guild_id), str(user_id), area),
+        ).fetchone()
+    return linha["nivel"] if linha else 0
+
+
+def niveis_construcoes(guild_id, user_id):
+    """{area: nivel} só com nível > 0."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT area, nivel FROM colecao_construcoes WHERE guild_id = ? AND user_id = ? AND nivel > 0",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {r["area"]: r["nivel"] for r in linhas}
+
+
+def subir_construcao(guild_id, user_id, area):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_construcoes (guild_id, user_id, area, nivel) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(guild_id, user_id, area) DO UPDATE SET nivel = nivel + 1",
+            (str(guild_id), str(user_id), area),
+        )
+        linha = conn.execute(
+            "SELECT nivel FROM colecao_construcoes WHERE guild_id = ? AND user_id = ? AND area = ?",
+            (str(guild_id), str(user_id), area),
+        ).fetchone()
+    return linha["nivel"]
+
+
+# --------------------------------------------------------------------------
+# Chamado (2026-09-01, escolhe o próximo World Boss, Seção 11)
+# --------------------------------------------------------------------------
+
+def definir_worldboss_forcado(guild_id, boss_tipo):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_worldboss_proximo_forcado (guild_id, boss_tipo) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET boss_tipo = excluded.boss_tipo",
+            (str(guild_id), boss_tipo),
+        )
+
+
+def consumir_worldboss_forcado(guild_id):
+    """Lê e APAGA de uma vez (consumido, vale só pro próximo evento) -
+    devolve o `boss_tipo` ou `None` se ninguém usou Chamado."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT boss_tipo FROM colecao_worldboss_proximo_forcado WHERE guild_id = ?", (str(guild_id),),
+        ).fetchone()
+        if linha is None:
+            return None
+        conn.execute("DELETE FROM colecao_worldboss_proximo_forcado WHERE guild_id = ?", (str(guild_id),))
+    return linha["boss_tipo"]
+
+
+# --------------------------------------------------------------------------
+# Roll/Claim Permanente (2026-09-01, drop raro do World Boss OU compra na
+# Loja) - contadores SEPARADOS por origem (pedido do usuário: "os rolls/
+# claims permanentes vendidos na loja sao contados diferentes se ganhos
+# dos boss"), cada um com seu próprio teto - `gacha._limite_rolls_atual`/
+# o cálculo de claims somam os DOIS juntos no limite final.
+# --------------------------------------------------------------------------
+
+def bonus_permanente_drop(guild_id, user_id):
+    """(bonus_rolls, bonus_claims) só da origem "drop do World Boss"."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT bonus_rolls_permanente_drop, bonus_claims_permanente_drop FROM colecao_estado_jogador "
+            "WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    if linha is None:
+        return 0, 0
+    return linha["bonus_rolls_permanente_drop"], linha["bonus_claims_permanente_drop"]
+
+
+def bonus_permanente_loja(guild_id, user_id):
+    """(bonus_rolls, bonus_claims) só da origem "comprado na Loja"."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT bonus_rolls_permanente_loja, bonus_claims_permanente_loja FROM colecao_estado_jogador "
+            "WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    if linha is None:
+        return 0, 0
+    return linha["bonus_rolls_permanente_loja"], linha["bonus_claims_permanente_loja"]
+
+
+def bonus_permanente_total(guild_id, user_id):
+    """(bonus_rolls, bonus_claims) somando AS DUAS origens - único valor
+    que `gacha._limite_rolls_atual`/o cálculo de claims usam de verdade."""
+    rolls_drop, claims_drop = bonus_permanente_drop(guild_id, user_id)
+    rolls_loja, claims_loja = bonus_permanente_loja(guild_id, user_id)
+    return rolls_drop + rolls_loja, claims_drop + claims_loja
+
+
+def _adicionar_bonus_permanente(guild_id, user_id, coluna, quantidade):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            f"INSERT INTO colecao_estado_jogador (guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, {coluna}) "
+            "VALUES (?, ?, 0, ?, 1, ?, ?) "
+            f"ON CONFLICT(guild_id, user_id) DO UPDATE SET {coluna} = {coluna} + excluded.{coluna}",
+            (str(guild_id), str(user_id), agora, agora, quantidade),
+        )
+
+
+def adicionar_bonus_permanente_drop(guild_id, user_id, campo, quantidade=1):
+    """`campo` em {"rolls", "claims"} - vocabulário FECHADO, nunca
+    interpolado a partir de entrada externa."""
+    coluna = {"rolls": "bonus_rolls_permanente_drop", "claims": "bonus_claims_permanente_drop"}[campo]
+    _adicionar_bonus_permanente(guild_id, user_id, coluna, quantidade)
+
+
+def adicionar_bonus_permanente_loja(guild_id, user_id, campo, quantidade=1):
+    """`campo` em {"rolls", "claims"} - vocabulário FECHADO, nunca
+    interpolado a partir de entrada externa."""
+    coluna = {"rolls": "bonus_rolls_permanente_loja", "claims": "bonus_claims_permanente_loja"}[campo]
+    _adicionar_bonus_permanente(guild_id, user_id, coluna, quantidade)
+
+
+# --------------------------------------------------------------------------
+# Estatísticas de vitória na Torre por personagem (2026-09-01)
+# --------------------------------------------------------------------------
+
+def registrar_vitoria_torre_personagens(guild_id, user_id, personagem_ids):
+    with conexao() as conn:
+        for personagem_id in personagem_ids:
+            conn.execute(
+                "INSERT INTO colecao_torre_estatisticas (guild_id, user_id, personagem_id, andares_vencidos) "
+                "VALUES (?, ?, ?, 1) "
+                "ON CONFLICT(guild_id, user_id, personagem_id) DO UPDATE SET andares_vencidos = andares_vencidos + 1",
+                (str(guild_id), str(user_id), personagem_id),
+            )
+
+
+def andares_vencidos_personagem(guild_id, user_id, personagem_id):
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT andares_vencidos FROM colecao_torre_estatisticas WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
+            (str(guild_id), str(user_id), personagem_id),
+        ).fetchone()
+    return linha["andares_vencidos"] if linha else 0
+
+
+def estatisticas_torre_top(guild_id, user_id, limite=10):
+    """[{"personagem_id", "nome", "andares_vencidos"}, ...] - as
+    personagens que mais contribuíram pra vitórias na Torre, maior
+    primeiro."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT s.personagem_id, s.andares_vencidos, p.nome FROM colecao_torre_estatisticas s "
+            "JOIN colecao_personagens p ON p.id = s.personagem_id "
+            "WHERE s.guild_id = ? AND s.user_id = ? ORDER BY s.andares_vencidos DESC LIMIT ?",
+            (str(guild_id), str(user_id), limite),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+# --------------------------------------------------------------------------
+# Métricas das Conquistas do Colecionador (2026-09-01,
+# `ERIS_sistema_colecao_wishards.md` Seções 22/24) - todas de leitura
+# barata (agregado SQL, nunca materializa a coleção inteira em Python) -
+# ver `pandora.conquistas.verificar_colecionador`, que só roda sob
+# demanda (painel "🏆 Conquistas"), nunca num caminho quente como claim.
+# --------------------------------------------------------------------------
+
+def incrementar_rolls_realizados(guild_id, user_id, quantidade):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador (guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, total_rolls_realizados) "
+            "VALUES (?, ?, 0, ?, 1, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET total_rolls_realizados = total_rolls_realizados + excluded.total_rolls_realizados",
+            (str(guild_id), str(user_id), agora, agora, quantidade),
+        )
+
+
+def incrementar_merges_realizados(guild_id, user_id):
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador (guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, total_merges_realizados) "
+            "VALUES (?, ?, 0, ?, 1, ?, 1) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET total_merges_realizados = total_merges_realizados + 1",
+            (str(guild_id), str(user_id), agora, agora),
+        )
+
+
+def metricas_colecionador(guild_id, user_id):
+    """Todas as métricas das Conquistas do Colecionador NUMA função só (1
+    dict) - cada valor vem de um agregado SQL barato, nunca de
+    materializar a coleção inteira em Python."""
+    guild_id, user_id = str(guild_id), str(user_id)
+    with conexao() as conn:
+        total_personagens = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_propriedade WHERE guild_id = ? AND dono_id = ?",
+            (guild_id, user_id),
+        ).fetchone()["n"]
+
+        por_raridade = {r["raridade"]: r["n"] for r in conn.execute(
+            "SELECT p.raridade AS raridade, COUNT(*) AS n FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "WHERE c.guild_id = ? AND c.dono_id = ? GROUP BY p.raridade",
+            (guild_id, user_id),
+        )}
+
+        claims = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_wishards_ledger WHERE guild_id = ? AND user_id = ? AND origem = 'claim'",
+            (guild_id, user_id),
+        ).fetchone()["n"]
+
+        rolls = conn.execute(
+            "SELECT total_rolls_realizados AS n FROM colecao_estado_jogador WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        rolls = rolls["n"] if rolls else 0
+
+        wishlist_obtidas = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_wishlist w JOIN colecao_propriedade c "
+            "ON c.guild_id = w.guild_id AND c.dono_id = w.user_id AND c.personagem_id = w.personagem_id "
+            "WHERE w.guild_id = ? AND w.user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()["n"]
+
+        afinidade_acumulada = conn.execute(
+            "SELECT COALESCE(SUM(afinidade), 0) AS soma FROM colecao_afinidade WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()["soma"]
+
+        soulmates = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_afinidade WHERE guild_id = ? AND user_id = ? AND is_soulmate = 1",
+            (guild_id, user_id),
+        ).fetchone()["n"]
+
+        trocas = conn.execute(
+            "SELECT COUNT(*) AS n FROM colecao_troca_proposta WHERE guild_id = ? AND status = 'aceita' "
+            "AND (proponente_id = ? OR alvo_id = ?)",
+            (guild_id, user_id, user_id),
+        ).fetchone()["n"]
+
+        merges = conn.execute(
+            "SELECT total_merges_realizados AS n FROM colecao_estado_jogador WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        merges = merges["n"] if merges else 0
+
+        # 🔥 Séries completas - só entre séries onde o jogador já tem
+        # PELO MENOS 1 personagem (bounded pelo tamanho da COLEÇÃO DELE,
+        # nunca pelo catálogo inteiro) comparadas contra o total daquela
+        # série no catálogo.
+        series_possuidas = conn.execute(
+            "SELECT p.serie AS serie, COUNT(*) AS n FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "WHERE c.guild_id = ? AND c.dono_id = ? AND p.serie IS NOT NULL AND p.serie != '' "
+            "GROUP BY p.serie",
+            (guild_id, user_id),
+        ).fetchall()
+        series_completas = 0
+        for linha_serie in series_possuidas:
+            total_da_serie = conn.execute(
+                "SELECT COUNT(*) AS n FROM colecao_personagens WHERE serie = ? AND ativo = 1",
+                (linha_serie["serie"],),
+            ).fetchone()["n"]
+            if total_da_serie > 0 and linha_serie["n"] >= total_da_serie:
+                series_completas += 1
+
+        valor_colecao = conn.execute(
+            "SELECT COALESCE(SUM(p.raridade * 20), 0) AS soma FROM colecao_propriedade c "
+            "JOIN colecao_personagens p ON p.id = c.personagem_id "
+            "WHERE c.guild_id = ? AND c.dono_id = ?",
+            (guild_id, user_id),
+        ).fetchone()["soma"]
+
+        wishards_movimentados = conn.execute(
+            "SELECT COALESCE(SUM(ABS(quantidade)), 0) AS soma FROM colecao_wishards_ledger WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()["soma"]
+
+    andar_torre = andar_atual_torre(guild_id, user_id)
+
+    return {
+        "personagens_totais": total_personagens,
+        "raridade_1": por_raridade.get(1, 0), "raridade_2": por_raridade.get(2, 0),
+        "raridade_3": por_raridade.get(3, 0), "raridade_4": por_raridade.get(4, 0), "raridade_5": por_raridade.get(5, 0),
+        "claims": claims, "rolls": rolls, "wishlist_obtidas": wishlist_obtidas,
+        "afinidade_acumulada": afinidade_acumulada, "soulmates": soulmates,
+        "trocas": trocas, "merges": merges, "series_completas": series_completas,
+        "valor_colecao": valor_colecao, "wishards_movimentados": wishards_movimentados,
+        "andares_torre": andar_torre,
+    }
