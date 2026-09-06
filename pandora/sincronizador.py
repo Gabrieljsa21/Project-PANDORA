@@ -11,7 +11,7 @@ de baixo churn, não precisa de nada mais agressivo. Checa a cada hora se já
 passou uma semana desde o ÚLTIMO SUCESSO (`db.estado_sincronizacao_
 catalogo`) - nunca dispara de novo só porque o processo reiniciou (comum
 neste ecossistema, ver `scripts/reiniciar_ecossistema.py` da GAIA), só
-quando o prazo de verdade já venceu. Roda só na instância `papel="completo"`
+quando o prazo de verdade já venceu. Roda só na instância `papel="principal"`
 (GAIA) - rodar nas duas seria download/reimportação duplicados à toa, sem
 ganho nenhum (upsert por `fonte_id` já deixa isso seguro, mas
 desnecessário)."""

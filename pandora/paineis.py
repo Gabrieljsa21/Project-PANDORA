@@ -23,6 +23,7 @@ equivalentes (`/colecao`, `/populares`, `/colecao_disponiveis`,
 `/pandora` é aditivo, não remove nada ainda."""
 import asyncio
 import json
+import re
 import traceback
 from datetime import datetime, timedelta, timezone
 
@@ -30,7 +31,7 @@ import discord
 from discord.ext import tasks
 
 from pandora import db
-from pandora import batalha, cidade, conquistas, consulta, economia, gacha, itens, series_favoritas, torre, worldboss
+from pandora import batalha, cidade, conquistas, consulta, economia, gacha, itens, personagens_favoritas, series_favoritas, torre, worldboss
 
 _COR_HUB = discord.Color(0xF1C40F)
 
@@ -64,9 +65,9 @@ def montar_embed_hub(guild, membro):
         (indice + 1 for indice, linha in enumerate(ranking) if str(linha["dono_id"]) == str(membro.id)), None,
     )
     embed = discord.Embed(title=f"🎴 Pandora - {membro.display_name}", color=_COR_HUB)
-    embed.add_field(name="💰 WiShards", value=str(saldo), inline=True)
-    embed.add_field(name="📚 Coleção", value=f"{len(colecao)} personagem(ns)", inline=True)
-    embed.add_field(name="💎 Soulstone", value=str(soulstone), inline=True)
+    embed.add_field(name="💰 WiShards", value=_fmt_numero(saldo), inline=True)
+    embed.add_field(name="📚 Coleção", value=f"{_fmt_numero(len(colecao))} personagem(ns)", inline=True)
+    embed.add_field(name="💎 Soulstone", value=_fmt_numero(soulstone), inline=True)
     embed.add_field(name="🏆 Ranking do servidor", value=(f"#{posicao}" if posicao else "sem personagens ainda"), inline=True)
     # 🔥 Progressão Global da conta (2026-08-30, análise do usuário: "a
     # personagem possui um limite de desenvolvimento. A conta não") -
@@ -75,7 +76,7 @@ def montar_embed_hub(guild, membro):
     progressao = db.progressao_conta(guild.id, membro.id)
     xp_necessario = db.xp_necessario_nivel(progressao["nivel"])
     embed.add_field(
-        name="📈 Progressão", value=f"Nível {progressao['nivel']} · {progressao['xp']}/{xp_necessario} XP", inline=True,
+        name="📈 Progressão", value=f"Nível {progressao['nivel']} · {_fmt_numero(progressao['xp'])}/{_fmt_numero(xp_necessario)} XP", inline=True,
     )
     return embed
 
@@ -93,89 +94,79 @@ class ViewHubWaifu(discord.ui.View):
         self._montar()
 
     def _montar(self):
+        """Ordem/linhas do hub (2026-09-04, pedido explícito do usuário -
+        layout ditado botão por botão):
+        Linha 0: Rolar, Claim All, Diária
+        Linha 1: Party, Trocas, PvP, Fusão
+        Linha 2: Cidade, Torre, World Boss
+        Linha 3: Loja, Inventário, Investir em Massa
+        Linha 4: Perfil, Personagem, Séries, Waifus
+
+        Coleção/Classes NÃO estão aqui de propósito - moraram pro "📖
+        Perfil" (2026-09-04, pedido anterior do mesmo dia). "Fusão" é o
+        MESMO botão que já existia como "Merge" (🔀) - só o rótulo/emoji
+        mudaram pra 🧬, callback (`_abrir_merge`) e nome interno intactos."""
         self.clear_items()
+
         rolar = discord.ui.Button(label="Rolar", emoji="🎲", style=discord.ButtonStyle.success, row=0)
         rolar.callback = self._rolar
         self.add_item(rolar)
-        colecao = discord.ui.Button(label="Coleção", emoji="📚", style=discord.ButtonStyle.primary, row=0)
-        colecao.callback = self._colecao
-        self.add_item(colecao)
-        # 🔥 Wishlist saiu daqui, virou botão dentro do "📖 Perfil"
-        # (2026-09-02, pedido do usuário: "poe ela e a wishlist dentro do
-        # perfil" - mesmo pedido do Ranking/Conquistas/Auto-claim antes).
-        party = discord.ui.Button(label="Party", emoji="👥", style=discord.ButtonStyle.secondary, row=0)
-        party.callback = self._party
-        self.add_item(party)
-        loja = discord.ui.Button(label="Loja", emoji="🛒", style=discord.ButtonStyle.secondary, row=1)
-        loja.callback = self._loja
-        self.add_item(loja)
-        trocar = discord.ui.Button(label="Trocas", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
-        trocar.callback = self._trocar
-        self.add_item(trocar)
-        # 🔥 Ranking saiu do hub, virou botão dentro do "📖 Perfil"
-        # (2026-09-02, pedido do usuário: "Mover Auto-claim, Ranking,
-        # Conquistas para dentro do perfil").
-        torre = discord.ui.Button(label="Torre", emoji="🗼", style=discord.ButtonStyle.secondary, row=1)
-        torre.callback = self._torre
-        self.add_item(torre)
-        ver = discord.ui.Button(label="Personagem", emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
-        ver.callback = self._ver
-        self.add_item(ver)
-        # 🔥 Botões do antigo painel "👤 Perfil" absorvidos direto no hub
-        # (2026-08-30, pedido do usuário: "botão de perfil é meio inutil,
-        # da p por todos os botoes e info dele ja no waifu") - Divorciar e
-        # Favoritar NÃO vieram junto, mudaram pro card "🔍 Personagem"
-        # (pedidos do mesmo usuário: "pode mover o divorciar para o lado
-        # do upar nivel" e, depois, "move a funcao de favoritar para
-        # entro da personagem").
-        merge = discord.ui.Button(label="Merge", emoji="🔀", style=discord.ButtonStyle.primary, row=2)
-        merge.callback = self._abrir_merge
-        self.add_item(merge)
-        # 🔥 "Prova de Soulmate" REMOVIDA (2026-08-30, Soulstone/Afinidade)
-        # - Soulmate agora acontece via reencontro numa personagem já no
-        # teto de Afinidade (`gacha._resolver_resultado`), não precisa
-        # mais de tela própria. Só o botão saiu - `_abrir_prova_soulmate`/
-        # `_prova_selecionada`/`_ViewEscolherRespostaProva`/
-        # `_ViewEnfrentarProva`/`_embed_resultado_prova` ficam intactos e
-        # dormentes (decisão do usuário: reaproveitar/decidir depois).
-        # 🔥 Auto-claim (era "Auto-coleta") saiu do hub, virou botão dentro
-        # do "📖 Perfil" (2026-09-02, mesmo pedido do Ranking acima).
-        cidade_botao = discord.ui.Button(label="Cidade", emoji="🏙️", style=discord.ButtonStyle.secondary, row=2)
-        cidade_botao.callback = self._cidade
-        self.add_item(cidade_botao)
-        batalha_botao = discord.ui.Button(label="PvP", emoji="⚔️", style=discord.ButtonStyle.danger, row=2)
-        batalha_botao.callback = self._batalha
-        self.add_item(batalha_botao)
-        worldboss_botao = discord.ui.Button(label="World Boss", emoji="🐉", style=discord.ButtonStyle.danger, row=2)
-        worldboss_botao.callback = self._worldboss
-        self.add_item(worldboss_botao)
-        inventario_botao = discord.ui.Button(label="Inventário", emoji="🎒", style=discord.ButtonStyle.secondary, row=3)
-        inventario_botao.callback = self._inventario
-        self.add_item(inventario_botao)
-        # 🔥 Conquistas saiu do hub, virou botão dentro do "📖 Perfil"
-        # (2026-09-02, mesmo pedido do Ranking acima).
-        investir_botao = discord.ui.Button(label="Investir em Massa", emoji="📈", style=discord.ButtonStyle.secondary, row=3)
-        investir_botao.callback = self._investir_em_massa
-        self.add_item(investir_botao)
-        reivindicar_tudo_botao = discord.ui.Button(label="Claim All", emoji="🎯", style=discord.ButtonStyle.success, row=3)
+        reivindicar_tudo_botao = discord.ui.Button(label="Claim All", emoji="🎯", style=discord.ButtonStyle.success, row=0)
         reivindicar_tudo_botao.callback = self._reivindicar_tudo
         self.add_item(reivindicar_tudo_botao)
-        bonus_classe_botao = discord.ui.Button(label="Classes", emoji="⚔️", style=discord.ButtonStyle.secondary, row=3)
-        bonus_classe_botao.callback = self._bonus_classe
-        self.add_item(bonus_classe_botao)
         diaria_ok = db.diaria_disponivel(self.guild_id, self.autor_id)
         diaria_botao = discord.ui.Button(
             label="Diária" if diaria_ok else "Diária ✓", emoji="🎁",
-            style=discord.ButtonStyle.success if diaria_ok else discord.ButtonStyle.secondary, row=4,
+            style=discord.ButtonStyle.success if diaria_ok else discord.ButtonStyle.secondary, row=0,
         )
         diaria_botao.callback = self._diaria
         self.add_item(diaria_botao)
+
+        party = discord.ui.Button(label="Party", emoji="👥", style=discord.ButtonStyle.secondary, row=1)
+        party.callback = self._party
+        self.add_item(party)
+        trocar = discord.ui.Button(label="Trocas", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+        trocar.callback = self._trocar
+        self.add_item(trocar)
+        batalha_botao = discord.ui.Button(label="PvP", emoji="⚔️", style=discord.ButtonStyle.danger, row=1)
+        batalha_botao.callback = self._batalha
+        self.add_item(batalha_botao)
+        merge = discord.ui.Button(label="Fusão", emoji="🧬", style=discord.ButtonStyle.primary, row=1)
+        merge.callback = self._abrir_merge
+        self.add_item(merge)
+
+        cidade_botao = discord.ui.Button(label="Cidade", emoji="🏙️", style=discord.ButtonStyle.secondary, row=2)
+        cidade_botao.callback = self._cidade
+        self.add_item(cidade_botao)
+        torre = discord.ui.Button(label="Torre", emoji="🗼", style=discord.ButtonStyle.secondary, row=2)
+        torre.callback = self._torre
+        self.add_item(torre)
+        worldboss_botao = discord.ui.Button(label="World Boss", emoji="🐉", style=discord.ButtonStyle.danger, row=2)
+        worldboss_botao.callback = self._worldboss
+        self.add_item(worldboss_botao)
+
+        loja = discord.ui.Button(label="Loja", emoji="🛒", style=discord.ButtonStyle.secondary, row=3)
+        loja.callback = self._loja
+        self.add_item(loja)
+        inventario_botao = discord.ui.Button(label="Inventário", emoji="🎒", style=discord.ButtonStyle.secondary, row=3)
+        inventario_botao.callback = self._inventario
+        self.add_item(inventario_botao)
+        investir_botao = discord.ui.Button(label="Investir em Massa", emoji="📈", style=discord.ButtonStyle.secondary, row=3)
+        investir_botao.callback = self._investir_em_massa
+        self.add_item(investir_botao)
+
         perfil_botao = discord.ui.Button(label="Perfil", emoji="📖", style=discord.ButtonStyle.secondary, row=4)
         perfil_botao.callback = self._perfil
         self.add_item(perfil_botao)
+        ver = discord.ui.Button(label="Personagem", emoji="🔍", style=discord.ButtonStyle.secondary, row=4)
+        ver.callback = self._ver
+        self.add_item(ver)
         series_favoritas_botao = discord.ui.Button(label="Séries", emoji="❤️", style=discord.ButtonStyle.secondary, row=4)
         series_favoritas_botao.callback = self._series_favoritas
         self.add_item(series_favoritas_botao)
+        favoritas_botao = discord.ui.Button(label="Waifus", emoji="💖", style=discord.ButtonStyle.secondary, row=4)
+        favoritas_botao.callback = self._favoritas
+        self.add_item(favoritas_botao)
 
     async def _somente_autor(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.autor_id:
@@ -203,27 +194,6 @@ class ViewHubWaifu(discord.ui.View):
             await interaction.followup.send(resultado, ephemeral=True)
             return
         await gacha.enviar_resultados(interaction, resultado)
-
-    async def _colecao(self, interaction: discord.Interaction):
-        """Manda uma mensagem NOVA (não edita o hub) - mesma visibilidade
-        (pública) que `/colecao` já tem hoje, só que com o select de modo
-        novo (Minha coleção/Populares/Disponíveis) por cima.
-
-        🔥 `asyncio.to_thread` (2026-08-30, achado do usuário: "O Cidade e
-        Personagem cai com frequencia nesse erro tbm [GAIA não respondeu a
-        tempo]") - o modo padrão ("minha") ordena a coleção INTEIRA por CP
-        (`torre.ordenar_por_power`), SQLite síncrono que bloquearia o
-        event loop do bot inteiro se rodasse dentro de `ViewColecaoHub.
-        __init__` (que é síncrono, `View.__init__` não pode ser `async`) -
-        calculado AQUI antes de construir a View, pra rodar numa thread
-        separada."""
-        if not await self._somente_autor(interaction):
-            return
-        colecao_minha = await asyncio.to_thread(
-            ViewColecaoHub.colecao_minha_ordenada, interaction.guild.id, interaction.user.id,
-        )
-        view = ViewColecaoHub(interaction.guild, interaction.user, colecao_minha_precomputada=colecao_minha)
-        await interaction.response.send_message(view.formatar(), view=view)
 
     async def _party(self, interaction: discord.Interaction):
         """`/party` deixa de existir como comando (nem `/pandora party`) -
@@ -273,7 +243,7 @@ class ViewHubWaifu(discord.ui.View):
         self._montar()
         await interaction.response.edit_message(view=self)
         await interaction.followup.send(
-            f"🎁 Recompensa Diária resgatada! +{wishards} WiShards (saldo: {novo_saldo}) · 🎁 {texto_item}",
+            f"🎁 Recompensa Diária resgatada! +{_fmt_numero(wishards)} WiShards (saldo: {_fmt_numero(novo_saldo)}) · 🎁 {texto_item}",
             ephemeral=True,
         )
 
@@ -303,26 +273,25 @@ class ViewHubWaifu(discord.ui.View):
     async def _series_favoritas(self, interaction: discord.Interaction):
         """Gerenciar Séries Favoritas (2026-09-02) - até 25 slots (5 base +
         20 níveis de upgrade pagos, 2026-09-03), cada um com a série
-        escolhida e o bônus de CP ativo pros personagens dela."""
+        escolhida e o bônus de CP ativo pros personagens dela. Núcleo
+        compartilhado com o botão 📚 Séries do Perfil em `_enviar_series_
+        favoritas` (2026-09-03) - ver docstring de lá pro porquê de
+        `_ViewSeriesFavoritas.criar` não poder rodar dentro de um
+        `to_thread`."""
         if not await self._somente_autor(interaction):
             return
-        # 🔥 `defer()` ANTES do fetch caro (2026-09-02) - `_ViewSeriesFavoritas.
-        # criar` já busca os slots (`series_favoritas.listar`, CARO - varre
-        # a coleção inteira filtrada por série) via `to_thread` internamente,
-        # SEM `to_thread` por fora (`criar` precisa terminar de CONSTRUIR a
-        # View de volta na thread principal - ver docstring da classe pro
-        # bug real que isso corrigiu: View construída inteira dentro de um
-        # `to_thread` nunca recebe clique nenhum, silenciosamente).
-        print(f" [SERIES] abrindo painel - guild={self.guild_id} user={interaction.user.id}")
-        try:
-            await interaction.response.defer(ephemeral=True)
-            print(" [SERIES] defer() OK (abertura)")
-            view = await _ViewSeriesFavoritas.criar(self.guild_id, interaction.user.id)
-            await interaction.followup.send(view.formatar(), view=view, ephemeral=True)
-            print(" [SERIES] painel enviado.")
-        except Exception:
-            print(" [SERIES] !!! EXCEÇÃO abrindo o painel !!!")
-            traceback.print_exc()
+        await _enviar_series_favoritas(interaction, self.guild_id, interaction.user.id)
+
+    async def _favoritas(self, interaction: discord.Interaction):
+        """Personagens Favoritas (2026-09-03) - até 25 slots (5 base + 20
+        níveis de upgrade pagos, mesma curva de preço de Série Favorita),
+        cada um com Fortalecimento/Ascensão PRÓPRIOS (pertencem ao slot,
+        não à personagem que ocupa - ver `pandora.personagens_favoritas`)."""
+        if not await self._somente_autor(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        view = await _ViewPersonagensFavoritas.criar(self.guild_id, interaction.user.id)
+        await interaction.followup.send(embed=view.montar_embed(), view=view, ephemeral=True)
 
     async def _torre(self, interaction: discord.Interaction):
         if not await self._somente_autor(interaction):
@@ -422,7 +391,13 @@ class ViewHubWaifu(discord.ui.View):
         if not prontas:
             await interaction.response.send_message("Nenhuma personagem sua está em Afinidade 10 ainda.", ephemeral=True)
             return
-        view = _ViewSelecionarPersonagem(prontas, "Escolha quem vai enfrentar a Prova...", self._prova_selecionada)
+        # 🔥 mesmo formato de dropdown do Party/Merge (2026-09-06, pedido do
+        # usuário: "os de personagem tem q ser igual do party").
+        contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, self.autor_id)
+        view = _ViewSelecionarPersonagem(
+            prontas, "Escolha quem vai enfrentar a Prova...", self._prova_selecionada,
+            descricao=lambda p: _descricao_personagem_dropdown(p, self.guild_id, self.autor_id, contexto_lote),
+        )
         await interaction.response.send_message("Selecione:", view=view, ephemeral=True)
 
     async def _prova_selecionada(self, interaction: discord.Interaction, personagens):
@@ -462,7 +437,7 @@ class ViewHubWaifu(discord.ui.View):
         # demorar mais que isso.
         await interaction.response.defer()
         resultado = await asyncio.to_thread(cidade.coletar_producao_pendente, self.guild_id, interaction.user.id)
-        embed = _embed_cidade(resultado)
+        embed = await asyncio.to_thread(_embed_cidade, resultado, self.guild_id, interaction.user.id)
         await interaction.followup.send(embed=embed)
 
     async def _batalha(self, interaction: discord.Interaction):
@@ -518,23 +493,16 @@ class ViewHubWaifu(discord.ui.View):
             return
         total_wishards = sum(recompensa for _personagem, recompensa in conquistadas)
         linhas = [
-            f"{gacha._EMOJI_RARIDADE.get(personagem['raridade'], '💘')} {personagem['nome']}: +{recompensa} WiShards"
+            f"{gacha._EMOJI_RARIDADE.get(personagem['raridade'], '💘')} {personagem['nome']}: +{_fmt_numero(recompensa)} WiShards"
             for personagem, recompensa in conquistadas[:25]
         ]
         texto = "\n".join(linhas)
         if len(conquistadas) > 25:
             texto += f"\n... e mais {len(conquistadas) - 25} personagem(ns)."
         await interaction.followup.send(
-            f"🎯 Reivindicadas {len(conquistadas)} personagem(ns), +{total_wishards} WiShards no total:\n{texto}",
+            f"🎯 Reivindicadas {len(conquistadas)} personagem(ns), +{_fmt_numero(total_wishards)} WiShards no total:\n{texto}",
             ephemeral=True,
         )
-
-    async def _bonus_classe(self, interaction: discord.Interaction):
-        if not await self._somente_autor(interaction):
-            return
-        view = ViewBonusClasseHub(self.guild_id, interaction.user.id)
-        embed = await asyncio.to_thread(view.formatar)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ==========================================================================
@@ -554,7 +522,6 @@ def _fmt_pct(numerador, denominador):
 def _montar_embed_perfil(guild_id, user_id):
     resumo = db.resumo_perfil_geral(guild_id, user_id)
     por_raridade = db.resumo_perfil_raridade(guild_id, user_id)
-    favoritas = [item for item in series_favoritas.listar(guild_id, user_id) if item["serie"]]
 
     embed = discord.Embed(title="👤 Perfil", color=0x8E44AD)
     embed.add_field(
@@ -582,27 +549,91 @@ def _montar_embed_perfil(guild_id, user_id):
             )
         embed.add_field(name="📚 Coleção por Raridade", value="\n\n".join(linhas)[:1024], inline=False)
 
-    if favoritas:
-        linhas = []
-        for item in favoritas:
-            marco = lambda ok: " ✅" if ok else ""
-            bonus_pct = f"+{item['bonus_percentual']:.0%}" if item["bonus_percentual"] else "nenhum"
-            linhas.append(
-                f"**{item['serie']}**\n"
-                f"📚 {_fmt_pct(item['possuidas'], item['total_catalogo'])}{marco(item['colecao_completa'])}\n"
-                f"⭐ {_fmt_pct(item['nivel_maximo'], item['possuidas'])}{marco(item['maestria_completa'])}\n"
-                f"❤️ {_fmt_pct(item['afinidade_maxima'], item['possuidas'])}{marco(item['afinidade_completa'])}\n"
-                f"💕 {_fmt_pct(item['soulmates'], item['possuidas'])}{marco(item['soulbond_completo'])}\n"
-                f"Bônus: {bonus_pct} CP"
-            )
-        embed.add_field(name="❤️ Séries Favoritas", value="\n\n".join(linhas)[:1024], inline=False)
-    else:
-        embed.add_field(name="❤️ Séries Favoritas", value="Nenhuma ainda - use ❤️ Séries no hub.", inline=False)
+    # 🔥 Séries Favoritas SAIU do embed do Perfil (2026-09-03, achado do
+    # usuário: "Perfil tem limite de caracteres e esta perdendo coleções
+    # das series" - até 25 séries favoritadas, ~5 linhas cada, num ÚNICO
+    # campo de embed juntado e cortado em `[:1024]` (o teto de UM campo,
+    # bem menor que o total real - dado sendo perdido em silêncio). Virou
+    # botão próprio ("📚 Séries", `_ViewPerfil._series`) que abre `_montar_
+    # embed_series_favoritas` - 1 campo de embed POR série (até 25 campos,
+    # teto real do Discord), nunca um campo só com tudo junto. Também evita
+    # chamar `series_favoritas.listar` (documentado como CARO) toda vez que
+    # o Perfil abre, só quando o botão é clicado.
+    embed.add_field(name="❤️ Séries Favoritas", value="Veja/edite com o botão 📚 Séries abaixo.", inline=False)
 
-    embed.add_field(name="🏆 Conquistas", value=str(len(db.conquistas_do_jogador(guild_id, user_id))), inline=True)
-    embed.add_field(name="🗼 Torre", value=f"Andar {db.andar_atual_torre(guild_id, user_id)}", inline=True)
-    embed.add_field(name="💠 Soulstones", value=str(db.saldo_soulstone(guild_id, user_id)), inline=True)
+    embed.add_field(name="🏆 Conquistas", value=_fmt_numero(len(db.conquistas_do_jogador(guild_id, user_id))), inline=True)
+    embed.add_field(name="🗼 Torre", value=f"Andar {_fmt_numero(db.andar_atual_torre(guild_id, user_id))}", inline=True)
+    embed.add_field(name="💠 Soulstones", value=_fmt_numero(db.saldo_soulstone(guild_id, user_id)), inline=True)
     return embed
+
+
+# 🔥 Alinhamento da grade 3-colunas (2026-09-03, achado do usuário vendo o
+# resultado ao vivo: "consegue deixar tudo bem alinhado?", "independente
+# do tamanho do titulo") - título de campo LONGO quebra em 2 linhas,
+# título CURTO fica em 1 só; como as 3 colunas de uma mesma linha do
+# Discord compartilham a altura da linha mas cada campo começa seu corpo
+# logo ABAIXO do próprio título, um título de 1 linha faz o corpo daquele
+# campo começar mais alto que o vizinho de título 2 linhas - a "grade"
+# desalinha. Corrigido truncando o nome bem curto (`_LARGURA_TITULO_
+# SERIE`, orçamento conservador pra nunca quebrar sozinho em 2 linhas,
+# nem no client mobile) - todo título fica em 1 linha só, sempre.
+# 🔥 (2026-09-03, achado do usuário: "remove esse espaço apos o titulo")
+# - a 1ª versão também forçava uma 2ª linha vazia (`\n` + zero-width
+# space) em TODO campo pra garantir altura 2 - resolvia o alinhamento mas
+# deixava um vão feio entre título e conteúdo em campo nenhum precisava
+# disso. Removido - a truncagem sozinha já garante 1 linha sempre, o que
+# já é suficiente pro alinhamento (altura constante = 1 linha em vez de
+# 2, mas ainda constante).
+_LARGURA_TITULO_SERIE = 24
+
+
+def _nome_campo_serie(slot, serie):
+    prefixo = f"Slot {slot}: "
+    orcamento = max(_LARGURA_TITULO_SERIE - len(prefixo), 1)
+    curto = serie if len(serie) <= orcamento else serie[: orcamento - 1].rstrip() + "…"
+    return f"{prefixo}{curto}"
+
+
+def _montar_embed_series_favoritas(guild_id, user_id):
+    """Estatísticas detalhadas das Séries Favoritas (2026-09-03, extraído
+    do antigo campo único do Perfil - ver comentário em `_montar_embed_
+    perfil`) - 1 CAMPO DE EMBED POR SÉRIE (nunca um campo só com tudo
+    junto e cortado em [:1024]) - até 25 séries favoritadas cabem
+    confortavelmente nos até 25 campos que um embed aceita, cada um bem
+    abaixo do teto de 1024 chars por campo. Título truncado + altura fixa
+    via `_nome_campo_serie` - ver comentário acima pro porquê."""
+    favoritas = [item for item in series_favoritas.listar(guild_id, user_id) if item["serie"]]
+    embed = discord.Embed(title="❤️ Séries Favoritas", color=0x8E44AD)
+    if not favoritas:
+        embed.description = "Nenhuma ainda - escolha um slot abaixo pra favoritar uma série."
+        return embed
+    for item in favoritas:
+        marco = lambda ok: " ✅" if ok else ""
+        bonus_pct = f"+{item['bonus_percentual']:.0%}" if item["bonus_percentual"] else "nenhum"
+        valor = (
+            f"📚 {_fmt_pct(item['possuidas'], item['total_catalogo'])}{marco(item['colecao_completa'])}\n"
+            f"⭐ {_fmt_pct(item['nivel_maximo'], item['possuidas'])}{marco(item['maestria_completa'])}\n"
+            f"❤️ {_fmt_pct(item['afinidade_maxima'], item['possuidas'])}{marco(item['afinidade_completa'])}\n"
+            f"💕 {_fmt_pct(item['soulmates'], item['possuidas'])}{marco(item['soulbond_completo'])}\n"
+            f"Bônus: {bonus_pct} CP"
+        )
+        embed.add_field(name=_nome_campo_serie(item["slot"], item["serie"]), value=valor, inline=True)
+    return embed
+
+
+async def _enviar_series_favoritas(interaction: discord.Interaction, guild_id, autor_id):
+    """Núcleo compartilhado de "abrir a tela de Séries Favoritas" - usado
+    tanto pelo botão ❤️ Séries do hub raiz quanto pelo botão 📚 Séries do
+    Perfil (2026-09-03, pedido do usuário: "pode por as series separadas
+    dentro de um botão la naquela tela [Perfil]"), pra nunca duplicar essa
+    lógica entre os dois pontos de entrada. Manda o editor de slots
+    (`_ViewSeriesFavoritas`, texto puro) + o embed de estatísticas
+    detalhadas (`_montar_embed_series_favoritas`) juntos, na mesma
+    mensagem."""
+    await interaction.response.defer(ephemeral=True)
+    view = await _ViewSeriesFavoritas.criar(guild_id, autor_id)
+    embed = await asyncio.to_thread(_montar_embed_series_favoritas, guild_id, autor_id)
+    await interaction.followup.send(view.formatar(), embed=embed, view=view, ephemeral=True)
 
 
 class _ViewPerfil(discord.ui.View):
@@ -634,12 +665,30 @@ class _ViewPerfil(discord.ui.View):
         conquistas_botao = discord.ui.Button(label="Conquistas", emoji="🏆", style=discord.ButtonStyle.secondary, row=0)
         conquistas_botao.callback = self._conquistas
         self.add_item(conquistas_botao)
-        favoritos_botao = discord.ui.Button(label="Favoritos", emoji="⭐", style=discord.ButtonStyle.secondary, row=1)
-        favoritos_botao.callback = self._favoritos
-        self.add_item(favoritos_botao)
+        # 🔥 Favoritos + Wishlist fundidos num botão só (2026-09-03, pedido
+        # do usuário: "tem Favoritos e Wishlist, Vamos unir tudo em
+        # Wishlist... melhor manter o favoritos e apenas renomea-lo para
+        # wishlist", depois "sim, renomear tudo pra wishlist internamente")
+        # - o MECANISMO (tabela `colecao_favoritas`, acesso "com emote e
+        # botão fácil" citado pelo usuário) continua o mesmo, mas toda a
+        # nomenclatura interna (funções/classes/callback) agora é
+        # `wishlist`, não só o rótulo visível.
         wishlist_botao = discord.ui.Button(label="Wishlist", emoji="⭐", style=discord.ButtonStyle.secondary, row=1)
         wishlist_botao.callback = self._wishlist
         self.add_item(wishlist_botao)
+        series_botao = discord.ui.Button(label="Séries", emoji="📚", style=discord.ButtonStyle.secondary, row=1)
+        series_botao.callback = self._series
+        self.add_item(series_botao)
+        # 🔥 Coleção/Classes saíram do hub raiz, viraram botões aqui
+        # (2026-09-04, pedido do usuário: "coloca a coleções e classes q
+        # estao dentro do /pandora em perfil") - mesmo espírito do
+        # Ranking/Conquistas/Auto-claim/Wishlist, movidos antes.
+        colecao_botao = discord.ui.Button(label="Coleção", emoji="📚", style=discord.ButtonStyle.primary, row=1)
+        colecao_botao.callback = self._colecao
+        self.add_item(colecao_botao)
+        bonus_classe_botao = discord.ui.Button(label="Classes", emoji="⚔️", style=discord.ButtonStyle.secondary, row=1)
+        bonus_classe_botao.callback = self._bonus_classe
+        self.add_item(bonus_classe_botao)
 
     async def _somente_autor(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.autor_id:
@@ -692,24 +741,83 @@ class _ViewPerfil(discord.ui.View):
             embed.add_field(name="🎉 Novas conquistas!", value="\n".join(nomes_novos), inline=False)
         await interaction.followup.send(embed=embed, view=view)
 
-    async def _favoritos(self, interaction: discord.Interaction):
-        """Lista paginada dos favoritos (2026-09-02, pedido do usuário:
-        "quero q tenha uma lista com meus personagens favoritos, assim
-        como tem so de personagens") - mesma visibilidade ephemeral da
-        Wishlist, é lista pessoal."""
-        if not await self._somente_autor(interaction):
-            return
-        view = ViewFavoritosHub(self.guild_id, interaction.user.id)
-        await interaction.response.send_message(view.formatar(), view=view, ephemeral=True)
-
     async def _wishlist(self, interaction: discord.Interaction):
-        """Mesma visibilidade ephemeral que `/wishlist listar` já tem hoje -
-        é lista pessoal, nunca foi pública. Movida do hub raiz pra cá
-        (2026-09-02, "poe ela e a wishlist dentro do perfil")."""
+        """Favoritos + Wishlist fundidos (2026-09-03, "tem Favoritos e
+        Wishlist, Vamos unir tudo em Wishlist... melhor manter o favoritos
+        e apenas renomea-lo para wishlist", depois "sim, renomear tudo pra
+        wishlist internamente") - `ViewWishlistHub` é a MESMA
+        mecanismo de sempre (2026-09-02, "quero q tenha uma lista com meus
+        personagens favoritos"), só renomeada; aceita personagem NÃO
+        possuída (`db.wishlist_listar`/`wishlist_adicionar` não exigem mais
+        posse) - o botão "Wishlist" separado antigo foi removido, este é o
+        único agora. Mesma visibilidade ephemeral de sempre, é lista
+        pessoal.
+
+        🔥 Card único com imagem (2026-09-03, "A wishlist tem q ser igual
+        a tela de personagem, mostrando imagem e com os msm botoes") -
+        `ViewWishlistHub` deixou de ser uma lista de texto paginada
+        (`consulta.ViewColecao`) e virou o mesmo navegador de card do
+        "🔍 Personagem"/navegador de Série - `defer()` ANTES do
+        `to_thread` (mesma classe de bug já corrigida várias vezes nesta
+        sessão)."""
         if not await self._somente_autor(interaction):
             return
-        view = ViewWishlistHub(self.guild_id, interaction.user.id)
-        await interaction.response.send_message(view.formatar(), view=view, ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        view = await ViewWishlistHub.criar(self.guild_id, interaction.user.id)
+        await interaction.followup.send(embed=view.montar_embed(), view=view, ephemeral=True)
+
+    async def _series(self, interaction: discord.Interaction):
+        """Séries Favoritas acessível direto do Perfil (2026-09-03, pedido
+        do usuário: "pode por as series separadas dentro de um botão la
+        naquela tela" - o campo inline do Perfil truncava/perdia dado com
+        até 25 séries, ver `_montar_embed_perfil`). Mesmo painel do botão
+        ❤️ Séries do hub raiz (`_enviar_series_favoritas`)."""
+        if not await self._somente_autor(interaction):
+            return
+        await _enviar_series_favoritas(interaction, self.guild_id, interaction.user.id)
+
+    async def _colecao(self, interaction: discord.Interaction):
+        """Coleção acessível direto do Perfil (2026-09-04, pedido do
+        usuário: "coloca a coleções e classes q estao dentro do /pandora
+        em perfil") - mesmo painel de sempre, só mudou de onde é aberto.
+        Manda uma mensagem NOVA (não edita o Perfil) - mesma visibilidade
+        (pública) que `/colecao` já tem hoje, só que com o select de modo
+        novo (Minha coleção/Populares/Disponíveis) por cima.
+
+        🔥 `asyncio.to_thread` (2026-08-30, achado do usuário: "O Cidade e
+        Personagem cai com frequencia nesse erro tbm [GAIA não respondeu a
+        tempo]") - o modo padrão ("minha") ordena a coleção INTEIRA por CP
+        (`torre.ordenar_por_power`), SQLite síncrono que bloquearia o
+        event loop do bot inteiro se rodasse dentro de `ViewColecaoHub.
+        __init__` (que é síncrono, `View.__init__` não pode ser `async`) -
+        calculado AQUI antes de construir a View, pra rodar numa thread
+        separada."""
+        if not await self._somente_autor(interaction):
+            return
+        # 🔥 `defer()` ANTES do `to_thread` (2026-09-06, achado do usuário:
+        # "O botão Coleção dentro de Perfil nao responde") - mesma classe de
+        # bug já corrigida várias vezes neste arquivo: `colecao_minha_
+        # ordenada` roda ANTES de qualquer resposta à interação e ordena a
+        # coleção INTEIRA por CP (documentado acima como caro) - sem defer,
+        # estourava o orçamento de 3s do Discord pro 1º ack sempre que a
+        # coleção fosse grande, e o clique parecia simplesmente não fazer
+        # nada.
+        await interaction.response.defer()
+        colecao_minha = await asyncio.to_thread(
+            ViewColecaoHub.colecao_minha_ordenada, interaction.guild.id, interaction.user.id,
+        )
+        view = ViewColecaoHub(interaction.guild, interaction.user, colecao_minha_precomputada=colecao_minha)
+        await interaction.followup.send(view.formatar(), view=view)
+
+    async def _bonus_classe(self, interaction: discord.Interaction):
+        """Classes acessível direto do Perfil (2026-09-04, mesmo pedido
+        da Coleção acima) - mesmo painel de sempre, só mudou de onde é
+        aberto."""
+        if not await self._somente_autor(interaction):
+            return
+        view = ViewBonusClasseHub(self.guild_id, interaction.user.id)
+        embed = await asyncio.to_thread(view.formatar)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 async def _definir_serie_e_atualizar(view_series, slot, serie, interacao_editar_painel, interacao_responder):
@@ -914,7 +1022,7 @@ class _ViewSeriesFavoritas(discord.ui.View):
             proximo_nivel = db.nivel_upgrade_slots_serie_favorita(self.guild_id, self.user_id) + 1
             preco = db.PRECOS_UPGRADE_SLOT_SERIE_FAVORITA[proximo_nivel]
             comprar_botao = discord.ui.Button(
-                label=f"Comprar slot ({preco} WiShards)", emoji="🛒", style=discord.ButtonStyle.primary, row=1,
+                label=f"Comprar slot ({_fmt_numero(preco)} WiShards)", emoji="🛒", style=discord.ButtonStyle.primary, row=1,
             )
             comprar_botao.callback = self._comprar_slot
             self.add_item(comprar_botao)
@@ -1263,13 +1371,14 @@ class _ViewNavegarSerie(discord.ui.View):
         # 🔥 `gacha.comprar_com_revelacao` em vez de `db.comprar_personagem`
         # direto (2026-09-03, pedido do usuário: "esses botoes tem q
         # fazer exatamente o claim, definir clsse e tudo").
-        ok, mensagem = await gacha.comprar_com_revelacao(self.guild_id, personagem["id"], interaction.user)
+        ok, mensagem, tem_classe = await gacha.comprar_com_revelacao(self.guild_id, personagem["id"], interaction.user)
         if ok:
             # 🔥 Atualiza o `dono_id` LOCAL (2026-09-03) - sem isso o card
             # continuaria mostrando "🛒 Disponível" até reabrir o
             # navegador, já que o bloco carregado não é rebuscado depois
             # de comprar (só o `db` de verdade muda).
             personagem["dono_id"] = str(interaction.user.id)
+            mensagem += _sufixo_aviso_sem_classe(tem_classe)
         self._status = f"{'✅' if ok else '❌'} {mensagem}"
         await interaction.edit_original_response(embed=self.montar_embed(), view=self)
 
@@ -1293,24 +1402,28 @@ class _ViewNavegarSerie(discord.ui.View):
         aviso_saldo = " - **saldo insuficiente pra tudo, vai comprar o que der**" if saldo < preco_total else ""
         texto = (
             f"🛍️ **Comprar tudo de {self.serie}**\n"
-            f"{len(livres)} personagem(ns) livre(s) - total: **{preco_total} WiShards**\n"
-            f"Seu saldo: {saldo} WiShards{aviso_saldo}"
+            f"{len(livres)} personagem(ns) livre(s) - total: **{_fmt_numero(preco_total)} WiShards**\n"
+            f"Seu saldo: {_fmt_numero(saldo)} WiShards{aviso_saldo}"
         )
         view_confirmar = _ViewConfirmarComprarTudo(self.guild_id, self.autor_id, self.serie, livres)
         await interaction.followup.send(texto, view=view_confirmar, ephemeral=True)
 
     async def _favoritar(self, interaction: discord.Interaction):
+        """Favoritar/Wishlist (2026-09-03) - não exige mais posse (fusão
+        com a Wishlist antiga, `db.wishlist_adicionar` nunca checou posse
+        de verdade, só as views/comandos antigos checavam) - favoritar uma
+        personagem alheia ou ainda livre vira "colocar na lista de
+        desejos". Nome do método/rótulo mantido "favoritar" (não
+        "wishlist") de propósito - é o atalho "com emote e botão fácil"
+        que o usuário pediu pra preservar."""
         if not await self._somente_autor(interaction):
             return
         personagem = self.personagem
-        if personagem.get("dono_id") != self.autor_id:
-            await interaction.response.send_message("Só dá pra favoritar uma personagem que você já possui.", ephemeral=True)
-            return
-        if db.eh_favorita(self.guild_id, self.autor_id, personagem["id"]):
-            db.desfavoritar(self.guild_id, self.autor_id, personagem["id"])
+        if db.esta_na_wishlist(self.guild_id, self.autor_id, personagem["id"]):
+            db.wishlist_remover(self.guild_id, self.autor_id, personagem["id"])
             self._status = f"Desmarcada como favorita: **{personagem['nome']}**."
         else:
-            db.favoritar(self.guild_id, self.autor_id, personagem["id"])
+            db.wishlist_adicionar(self.guild_id, self.autor_id, personagem["id"])
             self._status = f"⭐ Marcada como favorita: **{personagem['nome']}**."
         await interaction.response.edit_message(embed=self.montar_embed(), view=self)
 
@@ -1323,34 +1436,370 @@ class _ViewNavegarSerie(discord.ui.View):
         embed = consulta.embed_carta_personagem(personagem)
         embed.set_footer(text=f"{self._indice_global + 1}/{self._total} · {self.serie}")
         dono_id = personagem.get("dono_id")
+        # 🔥 Favoritar/Wishlist SEMPRE habilitado, não importa quem é dono
+        # (2026-09-03, fusão Favoritos+Wishlist - "favoritar" virou também
+        # "colocar na lista de desejos" pra personagem que você não possui
+        # ainda, mesma regra que a Wishlist antiga já tinha: `db.favoritar`
+        # não exige posse, só o wish-roll (`wishlist_disponiveis_no_guild`)
+        # ignora quem já tem dono na hora de sortear).
+        favorita = db.esta_na_wishlist(self.guild_id, self.autor_id, personagem["id"])
+        self._botao_favoritar.disabled = False
+        self._botao_favoritar.label = "Desfavoritar" if favorita else "Favoritar"
+        self._botao_favoritar.style = discord.ButtonStyle.success if favorita else discord.ButtonStyle.secondary
         if dono_id is None:
             preco = db.PRECOS_LOJA[personagem["raridade"]]
-            embed.add_field(name="Status", value=f"🛒 Disponível - {preco} WiShards", inline=True)
+            embed.add_field(name="Status", value=f"🛒 Disponível - {_fmt_numero(preco)} WiShards", inline=True)
             self._botao_comprar.disabled = False
-            self._botao_comprar.label = f"Comprar ({preco})"
-            self._botao_favoritar.disabled = True
-            self._botao_favoritar.label = "Favoritar"
-            self._botao_favoritar.style = discord.ButtonStyle.secondary
+            self._botao_comprar.label = f"Comprar ({_fmt_numero(preco)})"
         elif dono_id == self.autor_id:
             power, _nivel, categoria = torre.power_personagem(personagem, self.guild_id, self.autor_id)
             embed.add_field(name="Status", value="✅ Já é sua", inline=True)
-            embed.add_field(name="CP", value=f"{torre.icone_categoria(categoria)} {power:.0f}", inline=True)
+            embed.add_field(name="CP", value=f"{torre.icone_categoria(categoria)} {_fmt_numero(power)}", inline=True)
             self._botao_comprar.disabled = True
             self._botao_comprar.label = "Já é sua"
-            favorita = db.eh_favorita(self.guild_id, self.autor_id, personagem["id"])
-            self._botao_favoritar.disabled = False
-            self._botao_favoritar.label = "Desfavoritar" if favorita else "Favoritar"
-            self._botao_favoritar.style = discord.ButtonStyle.success if favorita else discord.ButtonStyle.secondary
         else:
             embed.add_field(name="Status", value=f"🔒 Possuída por <@{dono_id}>", inline=True)
             self._botao_comprar.disabled = True
             self._botao_comprar.label = "Indisponível"
-            self._botao_favoritar.disabled = True
-            self._botao_favoritar.label = "Favoritar"
-            self._botao_favoritar.style = discord.ButtonStyle.secondary
         if self._status:
             embed.description = self._status
         return embed
+
+
+# ==========================================================================
+# Personagens Favoritas (2026-09-03) - mesma lógica estrutural de Séries
+# Favoritas acima, mas a progressão (Fortalecimento/Ascensão) pertence ao
+# SLOT, não à personagem - ver `pandora.personagens_favoritas` pro núcleo.
+# ==========================================================================
+
+class _ViewPersonagensFavoritas(discord.ui.View):
+    """Gerenciar Personagens Favoritas - navegador com setas ◀️/▶️ entre os
+    slots (2026-09-06, pedido do usuário: "quero q na propria tela de
+    waifus... seja como a tela de personagens, q tem as setas p ver as
+    imagens e dados detalhados de cada uma"), mesmo espírito de `_ViewNivel`
+    ("🔍 Personagem") - substitui o antigo par "lista em texto + Select de
+    slot" (`_ViewPersonagensFavoritas`) + "mensagem separada de detalhe"
+    (`_ViewDetalheFavorita`, hoje fundida aqui) por UMA tela só, sempre
+    mostrando o card completo (imagem/classe/vínculo) do slot atual. Nunca
+    precisa paginar em blocos de 25 como "🔍 Personagem" faz - o total de
+    slots é sempre pequeno (`SLOTS_MAXIMO`, no máximo 25), cabe inteiro em
+    memória de uma vez."""
+
+    @classmethod
+    async def criar(cls, guild_id, user_id, indice=0):
+        # 🔥 `criar()` async, busca fora de `__init__` (2026-09-03, mesmo
+        # motivo já documentado em `_ViewSeriesFavoritas`: construir a View
+        # inteira dentro de um `to_thread` deixa `BaseView.__init__` sem
+        # event loop, e todo clique subsequente é descartado em silêncio).
+        # 🔥 `contexto_lote` também pré-carregado aqui (2026-09-06, pedido
+        # do usuário: "Nesse dropdown de slot era p ser igual dos outros
+        # personagens, mostrando todas aquelas infos") - o dropdown "Ir
+        # direto pro slot" passou a usar `_descricao_personagem_dropdown`
+        # (classe/CP/CP base/Nível/Afinidade, mesmo formato de Party/Merge/
+        # "🔍 Personagem"), que precisa desse contexto em lote pra não abrir
+        # 1 consulta por slot ocupado.
+        slots = await asyncio.to_thread(personagens_favoritas.listar, guild_id, user_id)
+        contexto_lote = await asyncio.to_thread(torre._contexto_lote, guild_id, user_id)
+        return cls(guild_id, user_id, slots, indice=indice, contexto_lote=contexto_lote)
+
+    def __init__(self, guild_id, user_id, slots, indice=0, contexto_lote=None):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.user_id = str(user_id)
+        self._slots = slots
+        self._indice = min(indice, len(slots) - 1)
+        self._contexto_lote = contexto_lote
+        self._montar_botoes()
+
+    @property
+    def _item(self):
+        return self._slots[self._indice]
+
+    async def _atualizar(self):
+        self._slots = await asyncio.to_thread(personagens_favoritas.listar, self.guild_id, self.user_id)
+        self._contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, self.user_id)
+        self._indice = min(self._indice, len(self._slots) - 1)
+        self._montar_botoes()
+
+    def _montar_botoes(self):
+        self.clear_items()
+        self._montar_select_slots()
+        anterior = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1, disabled=self._indice <= 0)
+        anterior.callback = self._navegar_anterior
+        self.add_item(anterior)
+        proximo = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary, row=1, disabled=self._indice >= len(self._slots) - 1)
+        proximo.callback = self._navegar_proximo
+        self.add_item(proximo)
+
+        item = self._item
+        if item["personagem"]:
+            if item["proximo_fortalecimento"]:
+                # 🔥 Dropdown "até qual patamar ir" (2026-09-06, pedido do
+                # usuário: "o botao de fortalecer... tem de permitir
+                # fortalecer varios niveis por vez, por um dropdown igual
+                # nos outros locais, mostrando custo e qnt tenho") -
+                # substitui o antigo par "Fortalecer" (1 patamar) +
+                # "Fortalecer ao Máximo" (gasta tudo): a 1ª opção do
+                # dropdown É o antigo comportamento de 1 clique, a última é
+                # "gastar tudo que dá pra esse slot" - um botão só cobre os
+                # dois casos e tudo no meio.
+                fortalecer_botao = discord.ui.Button(label="Fortalecer", emoji="💪", style=discord.ButtonStyle.success, row=2)
+                fortalecer_botao.callback = self._fortalecer
+                self.add_item(fortalecer_botao)
+            elif item["elegivel_ascensao"]:
+                ascender_botao = discord.ui.Button(label="Ascender", emoji="✨", style=discord.ButtonStyle.success, row=2)
+                ascender_botao.callback = self._ascender
+                self.add_item(ascender_botao)
+            trocar_botao = discord.ui.Button(label="Trocar personagem", emoji="🔄", style=discord.ButtonStyle.secondary, row=3)
+            trocar_botao.callback = self._trocar
+            self.add_item(trocar_botao)
+            esvaziar_botao = discord.ui.Button(label="Esvaziar slot", emoji="🗑️", style=discord.ButtonStyle.danger, row=3)
+            esvaziar_botao.callback = self._esvaziar
+            self.add_item(esvaziar_botao)
+        else:
+            escolher_botao = discord.ui.Button(label="Escolher personagem", emoji="➕", style=discord.ButtonStyle.primary, row=2)
+            escolher_botao.callback = self._trocar
+            self.add_item(escolher_botao)
+
+        if len(self._slots) < personagens_favoritas.SLOTS_MAXIMO:
+            proximo_nivel = db.nivel_upgrade_slots_personagem_favorita(self.guild_id, self.user_id) + 1
+            preco = db.PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA[proximo_nivel]
+            comprar_botao = discord.ui.Button(
+                label=f"Comprar slot ({_fmt_numero(preco)} WiShards)", emoji="🛒", style=discord.ButtonStyle.primary, row=4,
+            )
+            comprar_botao.callback = self._comprar_slot
+            self.add_item(comprar_botao)
+
+    def _montar_select_slots(self):
+        """Dropdown "ir direto pro slot" (2026-09-06, pedido do usuário:
+        "Ficou faltando o dropdown p ir rapido para os personagens na tela
+        de waifu") - a troca pelo navegador com setas (leva anterior, mesmo
+        dia) perdeu esse atalho que a tela antiga já tinha (`slot_select`
+        de `_ViewPersonagensFavoritas`, versão pré-navegador); mesmo
+        espírito do "🔍 Personagem", que tem os dois ao mesmo tempo (setas
+        E um menu suspenso pra pular direto), não um só. Sempre cabe TUDO
+        numa página só (no máximo `SLOTS_MAXIMO`, bem abaixo do teto de 25
+        de um `discord.ui.Select`), então não precisa de bloco/paginação
+        como o "🔍 Personagem" precisa pra milhares de personagens.
+
+        🔥 Descrição PADRÃO (2026-09-06, pedido do usuário: "Nesse dropdown
+        de slot era p ser igual dos outros personagens, mostrando todas
+        aquelas infos") - reaproveita `_descricao_personagem_dropdown`
+        (classe, CP final, CP base, Nível, Afinidade, ícone de categoria),
+        o MESMO formato de Party/Merge/Trocas/"🔍 Personagem", em vez de um
+        texto próprio (só nome + "Power atual" do slot). O CP final aqui já
+        reflete o Power do PRÓPRIO slot (Fortalecimento/Ascensão) - `torre.
+        power_personagem` detecta sozinho que a personagem ocupa um slot
+        de Waifu via `favoritas_ocupantes` (parte do `contexto_lote`) e usa
+        o Power Base efetivo do slot em vez do natural; "CP base" continua
+        mostrando o natural (antes de qualquer investimento no slot), pra
+        comparar os dois."""
+        options = []
+        for indice, item in enumerate(self._slots):
+            if item["personagem"]:
+                texto, emoji = _descricao_personagem_dropdown(item["personagem"], self.guild_id, self.user_id, self._contexto_lote)
+                # 🔥 Power Atual (do SLOT, não o CP da descrição abaixo) DEPOIS
+                # do nome, entre parênteses (2026-09-06, correção do usuário:
+                # "valor era p ser igual antes Slot N: <Nome> (Power <Power
+                # Atual>)" - a tentativa anterior tinha posto o número ANTES
+                # do nome, formato errado) - mesmo formato de sempre, com o
+                # 💞 de Soulmate na frente do nome (não do número).
+                prefixo_soulmate = "💞 " if item["personagem"].get("is_soulmate") else ""
+                rotulo = f"Slot {item['slot']}: {prefixo_soulmate}{item['personagem']['nome']} (Power {_fmt_numero(item['power_atual'])})"
+            else:
+                texto, emoji = None, None
+                rotulo = f"Slot {item['slot']} (vazio)"
+            options.append(discord.SelectOption(
+                label=rotulo[:100], value=str(indice), description=texto[:100] if texto else None, emoji=emoji,
+                default=(indice == self._indice),
+            ))
+        select = discord.ui.Select(placeholder="💖 Ir direto pro slot...", options=options, row=0)
+        select.callback = self._selecionou_slot
+        self.add_item(select)
+
+    async def _selecionou_slot(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        self._indice = int(interaction.data["values"][0])
+        self._montar_botoes()
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    def montar_embed(self):
+        item = self._item
+        if not item["personagem"]:
+            embed = discord.Embed(title=f"💖 Waifu #{item['slot']}", color=0xE91E63)
+            embed.description = "Slot vazio - escolha uma personagem sua pra ocupar."
+        else:
+            p = item["personagem"]
+            # 🔥 Card completo reaproveitado (2026-09-06, pedido do usuário:
+            # "Na tela das waifus, quero ver as imagens das personagens
+            # tbm, com as classes e tudo") - `consulta.embed_carta_
+            # personagem` já monta imagem/classe/série/vínculo (mesmo card
+            # do "🔍 Personagem"); antes este embed era construído do zero,
+            # sem nenhum dos dois. Só o título/cor viram os do slot de
+            # Waifu por cima.
+            embed = consulta.embed_carta_personagem(p)
+            embed.title = f"💖 Waifu #{item['slot']} - {p['nome']}"
+            embed.color = 0xE91E63
+            embed.add_field(name="Power natural", value=_fmt_numero(item["power_natural"]), inline=True)
+            embed.add_field(name="Power atual", value=_fmt_numero(item["power_atual"]), inline=True)
+            if item["proximo_fortalecimento"]:
+                lo, hi = item["proximo_fortalecimento"]["patamar"]
+                custo = item["proximo_fortalecimento"]["custo"]
+                embed.add_field(
+                    name="Próximo Fortalecimento", value=f"{lo} → {hi}\nCusto: {_fmt_numero(custo)} Soulstones", inline=False,
+                )
+            else:
+                req = item["requisitos_ascensao"]
+                checklist = (
+                    f"Nível máximo: {'✅' if req['nivel_max'] else '❌'}\n"
+                    f"Afinidade máxima: {'✅' if req['afinidade_max'] else '❌'}\n"
+                    f"Soulmate: {'✅' if req['soulmate'] else '❌'}"
+                )
+                embed.add_field(name="Requisitos de Ascensão", value=checklist, inline=False)
+                if item["elegivel_ascensao"]:
+                    proxima = item["proxima_ascensao"]
+                    base = int(item["power_atual"])
+                    embed.add_field(
+                        name="Próxima Ascensão",
+                        value=f"{base} → {base + personagens_favoritas.BONUS_POWER_POR_ASCENSAO}\nCusto: {_fmt_numero(proxima['custo'])} Soulstones",
+                        inline=False,
+                    )
+        # 🔥 Indicador de posição "X/Y" (2026-09-06, mesmo espírito do
+        # "43/1200" de "🔍 Personagem") - aqui Y é sempre pequeno (no
+        # máximo `SLOTS_MAXIMO`), nunca precisa de paginação em bloco.
+        embed.set_footer(text=f"{self._indice + 1}/{len(self._slots)}")
+        return embed
+
+    async def _somente_autor(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("Esse painel não é seu.", ephemeral=True)
+            return False
+        return True
+
+    async def _navegar_anterior(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        self._indice = max(0, self._indice - 1)
+        self._montar_botoes()
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    async def _navegar_proximo(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        self._indice = min(len(self._slots) - 1, self._indice + 1)
+        self._montar_botoes()
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    async def _fortalecer(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        item = self._item
+        slot = item["slot"]
+        indice_proximo = item["proximo_fortalecimento"]["indice"]
+        ultimo_indice = len(personagens_favoritas.PATAMARES_FORTALECIMENTO) - 1
+        saldo = await asyncio.to_thread(db.saldo_soulstone, self.guild_id, interaction.user.id)
+
+        def _rotulo_opcao(indice_alvo):
+            _lo, hi = personagens_favoritas.PATAMARES_FORTALECIMENTO[indice_alvo]
+            return f"Fortalecer até {hi}"
+
+        async def _confirmar(interacao_confirmacao, indice_alvo):
+            ok, mensagem = await asyncio.to_thread(
+                personagens_favoritas.fortalecer_ate, self.guild_id, interacao_confirmacao.user.id, slot, indice_alvo,
+            )
+            if ok:
+                await self._atualizar()
+            # 🔥 Sempre volta pro card principal (mesmo em falha) - mesmo
+            # padrão de `_ascender`/`_esvaziar` - nunca deixa o dropdown de
+            # confirmação como beco sem saída.
+            await interacao_confirmacao.response.edit_message(embed=self.montar_embed(), view=self)
+            await interacao_confirmacao.followup.send(mensagem, ephemeral=True)
+
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(embed=self.montar_embed(), view=self)
+
+        view_escolher = _ViewEscolherAlvo(
+            "Fortalecimento", indice_proximo - 1, ultimo_indice,
+            lambda indice_alvo: personagens_favoritas.custo_fortalecer_ate(indice_proximo, indice_alvo),
+            "Soulstone", _confirmar, _cancelar, saldo_atual=saldo,
+            rotulo_opcao_fn=_rotulo_opcao, unidade_degrau="patamar",
+        )
+        await interaction.response.edit_message(embed=self.montar_embed(), view=view_escolher)
+
+    async def _ascender(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        await interaction.response.defer()
+        ok, mensagem = await asyncio.to_thread(personagens_favoritas.ascender, self.guild_id, interaction.user.id, self._item["slot"])
+        if ok:
+            await self._atualizar()
+            await interaction.edit_original_response(embed=self.montar_embed(), view=self)
+        await interaction.followup.send(mensagem, ephemeral=True)
+
+    async def _trocar(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        colecao = await asyncio.to_thread(db.colecao_do_usuario, self.guild_id, interaction.user.id)
+        if not colecao:
+            await interaction.response.send_message("Você não tem nenhuma personagem.", ephemeral=True)
+            return
+        # 🔥 mesmo formato de dropdown do Party/Merge/"🔍 Personagem"
+        # (2026-09-06, pedido do usuário: "os de personagem tem q ser igual
+        # do party") - antes caía no fallback simples (`#id · estrelas`) por
+        # não passar `descricao=` nenhum pro Modal de busca.
+        contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, interaction.user.id)
+        slot = self._item["slot"]
+
+        # 🔥 3 parâmetros, não 2 (achado do usuário: "gaia nao responde" ao
+        # selecionar) - `_ModalBuscarPersonagem.on_submit` sempre chama
+        # `ao_selecionar` com `(interacao, personagens, candidatos)` - o
+        # pool INTEIRO da busca vai como 3º argumento (2026-08-30, "quero q
+        # o dropdown de selecionar personagem nao suma ao escolher um"),
+        # nunca só 2. Sem o 3º parâmetro aqui, toda seleção estourava
+        # `TypeError` dentro do callback do discord.py - engolido em
+        # silêncio pela lib, nunca gerando resposta nenhuma (mesmo padrão
+        # de `_usar_protecao` acima, que já recebe e ignora esse 3º
+        # argumento com `_candidatos`).
+        async def _ao_selecionar(interacao_sel, personagens, _candidatos):
+            ok, mensagem = await asyncio.to_thread(
+                personagens_favoritas.definir_personagem, self.guild_id, interacao_sel.user.id, slot, personagens[0]["id"],
+            )
+            if ok:
+                await self._atualizar()
+                await interacao_sel.response.edit_message(embed=self.montar_embed(), view=self)
+                await interacao_sel.followup.send(mensagem, ephemeral=True)
+            else:
+                await interacao_sel.response.edit_message(content=mensagem, embed=None, view=None)
+
+        modal = _ModalBuscarPersonagem(
+            f"Favorita - Slot {slot}", colecao, "Escolha a personagem...", _ao_selecionar,
+            descricao=lambda p: _descricao_personagem_dropdown(p, self.guild_id, interaction.user.id, contexto_lote),
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _esvaziar(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        await interaction.response.defer()
+        _ok, mensagem = await asyncio.to_thread(
+            personagens_favoritas.definir_personagem, self.guild_id, interaction.user.id, self._item["slot"], None,
+        )
+        await self._atualizar()
+        await interaction.edit_original_response(embed=self.montar_embed(), view=self)
+        await interaction.followup.send(mensagem, ephemeral=True)
+
+    async def _comprar_slot(self, interaction: discord.Interaction):
+        if not await self._somente_autor(interaction):
+            return
+        await interaction.response.defer()
+        ok, mensagem = await asyncio.to_thread(db.comprar_slot_personagem_favorita, self.guild_id, interaction.user.id)
+        if not ok:
+            await interaction.followup.send(mensagem, ephemeral=True)
+            return
+        await self._atualizar()
+        await interaction.edit_original_response(embed=self.montar_embed(), view=self)
+        await interaction.followup.send(mensagem, ephemeral=True)
 
 
 class _ViewConfirmarComprarTudo(discord.ui.View):
@@ -1383,15 +1832,26 @@ class _ViewConfirmarComprarTudo(discord.ui.View):
         if not await self._somente_autor(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        compradas, falhas, gasto_total = [], [], 0
+        compradas, falhas, sem_classe, gasto_total = [], [], [], 0
         for personagem in self._personagens_livres:
-            ok, mensagem = await gacha.comprar_com_revelacao(self.guild_id, personagem["id"], interaction.user)
+            ok, mensagem, tem_classe = await gacha.comprar_com_revelacao(self.guild_id, personagem["id"], interaction.user)
             if ok:
                 compradas.append(personagem["nome"])
                 gasto_total += db.PRECOS_LOJA[personagem["raridade"]]
+                if not tem_classe:
+                    sem_classe.append(personagem["nome"])
             else:
                 falhas.append(f"{personagem['nome']}: {mensagem}")
-        resumo = f"✅ Compradas {len(compradas)}/{len(self._personagens_livres)} personagem(ns) de **{self.serie}** por {gasto_total} WiShards."
+        resumo = f"✅ Compradas {len(compradas)}/{len(self._personagens_livres)} personagem(ns) de **{self.serie}** por {_fmt_numero(gasto_total)} WiShards."
+        # 🔥 Aviso de "sem classe" (2026-09-05, achado do usuário: "as
+        # personagens compradas estão vindo sem classe") - "Comprar Tudo"
+        # dispara 1 classificação por personagem SEQUENCIALMENTE, fácil
+        # estourar a cota diária da Groq (~23 classificações reais/dia,
+        # ver CHANGELOG) numa série grande - antes, a compra em si sempre
+        # tinha sucesso e ninguém percebia a falta de classe até auditar
+        # depois. `/pandora_admin validar_classes` (já existia) retenta.
+        if sem_classe:
+            resumo += f"\n⚠️ {len(sem_classe)}/{len(compradas)} sem classe ainda (GAIA sem cota/fora do ar) - `/pandora_admin validar_classes` tenta de novo depois."
         if falhas:
             resumo += "\n❌ " + "\n❌ ".join(falhas[:10])
             if len(falhas) > 10:
@@ -1417,12 +1877,14 @@ class _ViewEscolherMergeAlvo(discord.ui.View):
         self.guild_id = guild_id
         self._ids_sacrificio = ids_sacrificio
         self._personagens = personagens
+
+        def _opcao(indice, p):
+            texto, emoji = _descricao_personagem_livre_dropdown(p)
+            return discord.SelectOption(label=p["nome"][:100], description=texto, value=str(indice), emoji=emoji)
+
         select = discord.ui.Select(
             placeholder=f"Receber qual {estrelas}...",
-            options=[
-                discord.SelectOption(label=p["nome"][:100], description=f"#{p['id']}", value=str(indice))
-                for indice, p in enumerate(personagens)
-            ],
+            options=[_opcao(indice, p) for indice, p in enumerate(personagens)],
         )
         select.callback = self._escolher
         self.add_item(select)
@@ -1433,6 +1895,15 @@ class _ViewEscolherMergeAlvo(discord.ui.View):
             economia.executar_merge, self.guild_id, interaction.user.id, self._ids_sacrificio, escolhida["id"],
         )
         if ok:
+            # 🔥 `revelar_classe` (2026-09-03, achado do usuário: "Validar
+            # Classes... se ao comprar pela colecao ta setando classe" -
+            # `economia.executar_merge` reivindica direto via `db.
+            # reivindicar`, sem passar pelo claim normal - mesmo gap já
+            # corrigido na Loja/navegador de série (`gacha.
+            # comprar_com_revelacao`), nunca corrigido aqui. Se a personagem
+            # recebida no Merge nunca foi reivindicada em NENHUM servidor
+            # antes, ela saía sem classe pra sempre.
+            await gacha.revelar_classe(escolhida)
             # 🔥 `to_thread` (2026-09-01) - `atualizar_snapshot_bonus` escaneia
             # a coleção INTEIRA, mesma classe de bug "GAIA não respondeu a
             # tempo" já corrigida em Auto-Party/Cidade/Personagem (SQLite
@@ -1471,31 +1942,66 @@ class _ViewEscolherRanking(discord.ui.View):
 
 def _descricao_personagem_dropdown(personagem, guild_id, user_id, contexto_lote=None):
     """`(texto, emoji)` PADRÃO de uma personagem num select - ícone de
-    categoria + CP + Nível + Afinidade (2026-08-30, pedido do usuário: "no
-    dropdwon de ver personagem tem q informar o icone da classe, CP, lv e
-    afinidade. Tem varios locais q repetem esse padrao, pq vc n esta
-    usando 1 p tudo?") - ÚNICO ponto que monta esse texto no pacote
-    inteiro, reaproveitado por TODO select que lista personagens
-    possuídas ("🔍 Personagem"/"🔄 Trocar de personagem", Merge, Party
-    Adicionar/Remover) - trocar o formato aqui atualiza todos de uma vez,
-    nunca precisa caçar duplicata de novo.
+    categoria + classe + CP (final e base) + Nível + Afinidade (2026-08-30,
+    pedido do usuário: "no dropdwon de ver personagem tem q informar o
+    icone da classe, CP, lv e afinidade. Tem varios locais q repetem esse
+    padrao, pq vc n esta usando 1 p tudo?") - ÚNICO ponto que monta esse
+    texto no pacote inteiro, reaproveitado por TODO select que lista
+    personagens possuídas ("🔍 Personagem"/"🔄 Trocar de personagem", Merge,
+    Party Adicionar/Remover, Batalha, Proteção, Waifus) - trocar o formato
+    aqui atualiza todos de uma vez, nunca precisa caçar duplicata de novo.
+
+    🔥 Classe + "CP base" (2026-09-06, pedido do usuário: "os de personagem
+    tem q ser igual do party, porem ainda falta acrescentar o CP base
+    daquele personagem, q esta relacionado a mecanica de waifu" + "no
+    dropdown tbm tem q mostrar a classe") - `torre.power_base(popularidade)`
+    é o Power Base NATURAL antes de Nível/Afinidade/Soulmate/bônus (300 a
+    1000, só a popularidade importa) - é o número que decide quanto do
+    Fortalecimento de um slot de Waifu a personagem já cobre sozinha (ver
+    `personagens_favoritas._estado_fortalecimento`), então é o dado que
+    interessa na hora de escolher QUEM colocar num slot, separado do CP
+    final (que já inclui todos os bônus de conta/classe/série).
 
     `contexto_lote` (opcional, de `torre._contexto_lote`) - evita N+1 de
     query ao montar uma LISTA inteira (até 25 opções): quem monta o select
     pré-carrega 1x e passa aqui, em vez de cada personagem abrir suas
     próprias conexões SQLite (mesmo problema já corrigido no Auto-Party)."""
-    niveis, bonus_global, cache_classe, bonus_series = contexto_lote or (None, None, None, None)
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = contexto_lote or (None, None, None, None, None)
     nivel = niveis.get(personagem["id"], 1) if niveis is not None else None
     power, nivel_resolvido, categoria = torre.power_personagem(
         personagem, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
-        bonus_series=bonus_series,
+        bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
     )
     afinidade_atual = personagem.get("afinidade", 1)
+    cp_base = torre.power_base(personagem["popularidade"])
+    classe = personagem.get("classe_exibicao") or personagem.get("classe")
+    classe_texto = f"{classe} · " if classe else ""
     texto = (
-        f"#{personagem['id']} · {gacha.estrelas_por_raridade(personagem['raridade'])} · "
-        f"Nv.{nivel_resolvido} · CP {power:.0f} · 💞{afinidade_atual}"
+        f"#{personagem['id']} · {classe_texto}{gacha.estrelas_por_raridade(personagem['raridade'])} · "
+        f"Nv.{nivel_resolvido} · CP {_fmt_numero(power)} (base {_fmt_numero(cp_base)}) · 💞{afinidade_atual}"
     )
     return texto, torre.icone_categoria(categoria)
+
+
+def _descricao_personagem_livre_dropdown(personagem):
+    """`(texto, emoji)` pra listas de personagens SEM dono ou de dono
+    ALHEIO variável (Merge - escolher quem receber; Loja - "Comprar";
+    Revanche - personagens perdidas, cada uma com um dono atual
+    diferente) - versão mais simples de `_descricao_personagem_dropdown`
+    acima, sem Nível/Afinidade (não fazem sentido sem UM dono fixo pra
+    consultar), mas com a MESMA classe + CP base que o pedido do usuário
+    (2026-09-06: "os de personagem tem q ser igual do party"... "no
+    dropdown tbm tem q mostrar a classe") pede em qualquer select de
+    personagem. `CP base` (`torre.power_base`) não depende de
+    conta/vínculo nenhum, por isso funciona igual aqui."""
+    cp_base = torre.power_base(personagem["popularidade"])
+    classe = personagem.get("classe_exibicao") or personagem.get("classe")
+    classe_texto = f"{classe} · " if classe else ""
+    texto = f"#{personagem['id']} · {classe_texto}{gacha.estrelas_por_raridade(personagem['raridade'])} · CP base {_fmt_numero(cp_base)}"
+    # 🔥 `categoria_personagem` é puro (só olha `personagem["classe"]`, sem
+    # precisar de dono/vínculo nenhum) - dá pro ícone de categoria (⚔️/🛡️/✨)
+    # aparecer igual ao Party mesmo em listas sem dono fixo.
+    return texto[:100], torre.icone_categoria(torre.categoria_personagem(personagem))
 
 
 class _ViewSelecionarPersonagem(discord.ui.View):
@@ -1577,18 +2083,46 @@ class _ViewEscolherAlvo(discord.ui.View):
     Global/Potencial da Coleção, mesmo dia, "tbm tem de permitr comprar
     varios leveis por vez... informando custo e qnt possuo") - essas telas
     usam `content` (texto puro) em vez de `embed`, então `_selecionou`
-    passou a atualizar UM dos dois, o que a mensagem original tiver."""
+    passou a atualizar UM dos dois, o que a mensagem original tiver.
 
-    def __init__(self, rotulo, valor_atual, valor_maximo, custo_total_fn, unidade, ao_confirmar, ao_cancelar, saldo_atual=None):
+    🔥 "~X/nível" quando o alvo pula MAIS de 1 degrau (2026-09-04, pedido
+    do usuário: "Pode deixar mais claro na tela" - achado investigando um
+    relato de "preço errado": o Nv.340 custando 820k e o Nv.341 seguinte
+    custando só 34k não é bug nenhum, `custo_total_fn` sempre soma TODOS
+    os degraus de onde você está até o alvo - 820k era o preço de 25
+    níveis de uma vez (316->340), 34k era 1 nível só (340->341), nunca deu
+    pra comparar os dois. O rótulo "Custo total" sozinho não deixava isso
+    óbvio - toda opção que pula mais de 1 nível agora também mostra
+    quantos níveis estão inclusos e o custo médio de cada um.
+
+    🔥 `rotulo_opcao_fn`/`unidade_degrau` (2026-09-06, Fortalecimento de
+    Waifu - "por um dropdown igual nos outros locais") - generalizações
+    MÍNIMAS pra caber um domínio de "degraus" que não são incrementos de 1
+    unidade (Fortalecimento pula de 50 em 50, só 14 patamares no total, com
+    label específico tipo "Fortalecer até 500") sem duplicar toda a lógica
+    de custo acumulado/confirmação/preservação do embed que já existe
+    aqui: `rotulo_opcao_fn(alvo)` troca o rótulo padrão `f"{rotulo} {alvo}"`
+    por um customizado; `unidade_degrau` troca a palavra "nível" (ex.: pra
+    "patamar"). Ambos opcionais - `None`/padrão mantém o comportamento de
+    sempre pra Upar Nível/Afinidade/Loja/Construção, nenhum desses precisou
+    mudar uma linha."""
+
+    def __init__(
+        self, rotulo, valor_atual, valor_maximo, custo_total_fn, unidade, ao_confirmar, ao_cancelar,
+        saldo_atual=None, rotulo_opcao_fn=None, unidade_degrau="nível",
+    ):
         super().__init__(timeout=120)
         self._custo_total_fn = custo_total_fn
         self._unidade = unidade
+        self._unidade_degrau = unidade_degrau
         self._ao_confirmar = ao_confirmar
         self._ao_cancelar = ao_cancelar
+        self._valor_atual = valor_atual
+        rotulo_opcao_fn = rotulo_opcao_fn or (lambda alvo: f"{rotulo} {alvo}")
         options = [
             discord.SelectOption(
-                label=f"{rotulo} {alvo}", value=str(alvo),
-                description=f"Custo total: {_fmt_numero(custo_total_fn(alvo))} {unidade}"[:100],
+                label=rotulo_opcao_fn(alvo)[:100], value=str(alvo),
+                description=self._descricao_opcao(valor_atual, alvo, unidade)[:100],
             )
             for alvo in range(valor_atual + 1, valor_maximo + 1)
         ]
@@ -1603,15 +2137,29 @@ class _ViewEscolherAlvo(discord.ui.View):
         cancelar.callback = self._cancelar_direto
         self.add_item(cancelar)
 
+    def _descricao_opcao(self, valor_atual, alvo, unidade):
+        custo = self._custo_total_fn(alvo)
+        degraus = alvo - valor_atual
+        if degraus <= 1:
+            return f"Custo total: {_fmt_numero(custo)} {unidade}"
+        return f"Custo total: {_fmt_numero(custo)} {unidade} ({degraus} {self._unidade_degrau}(s), ~{_fmt_numero(custo / degraus)}/{self._unidade_degrau})"
+
     async def _selecionou(self, interaction: discord.Interaction):
         alvo = int(interaction.data["values"][0])
         custo = self._custo_total_fn(alvo)
+        degraus = alvo - self._valor_atual
 
         async def _confirmar(interacao_confirmacao):
             await self._ao_confirmar(interacao_confirmacao, alvo)
 
         view_confirmar = _ViewConfirmar(_confirmar, ao_cancelar=self._ao_cancelar)
-        texto = f"Ir até aqui custa **{_fmt_numero(custo)} {self._unidade}** - confirma?"
+        if degraus <= 1:
+            texto = f"Ir até aqui custa **{_fmt_numero(custo)} {self._unidade}** - confirma?"
+        else:
+            texto = (
+                f"Ir até aqui custa **{_fmt_numero(custo)} {self._unidade}** "
+                f"({degraus} {self._unidade_degrau}(s), ~{_fmt_numero(custo / degraus)}/{self._unidade_degrau}) - confirma?"
+            )
         embed_atual = interaction.message.embeds[0] if interaction.message.embeds else None
         if embed_atual:
             embed_atual = embed_atual.copy()
@@ -1915,12 +2463,12 @@ class _ViewNivel(discord.ui.View):
         # personagem pelo botao personagem, mostra a classe, CP e lv" -
         # classe/nível já apareciam, CP estava faltando).
         power, _nivel_ignorado, categoria = torre.power_personagem(self.personagem, self.guild_id, self.autor_id)
-        embed.add_field(name="CP", value=f"{torre.icone_categoria(categoria)} {power:.0f}", inline=True)
+        embed.add_field(name="CP", value=f"{torre.icone_categoria(categoria)} {_fmt_numero(power)}", inline=True)
         if custo is None:
             embed.add_field(name="Nível", value=f"{nivel_atual} (máximo)", inline=True)
             self.upar.disabled = True
         else:
-            embed.add_field(name="Nível", value=f"{nivel_atual} (próximo: {custo} WiShards)", inline=True)
+            embed.add_field(name="Nível", value=f"{nivel_atual} (próximo: {_fmt_numero(custo)} WiShards)", inline=True)
             self.upar.disabled = False
         # 🔥 Upar Afinidade com Soulstone (2026-08-30) - custo = nível-alvo
         # (pedido literal do usuário). NUNCA compra Soulmate - isso
@@ -1931,9 +2479,9 @@ class _ViewNivel(discord.ui.View):
             embed.add_field(name="Afinidade", value=f"{afinidade_atual} (máxima)", inline=True)
             self.upar_afinidade.disabled = True
         else:
-            embed.add_field(name="Afinidade", value=f"{afinidade_atual} (próximo: {custo_afinidade} Soulstone)", inline=True)
+            embed.add_field(name="Afinidade", value=f"{afinidade_atual} (próximo: {_fmt_numero(custo_afinidade)} Soulstone)", inline=True)
             self.upar_afinidade.disabled = False
-        favorita = db.eh_favorita(self.guild_id, self.autor_id, self.personagem["id"])
+        favorita = db.esta_na_wishlist(self.guild_id, self.autor_id, self.personagem["id"])
         self.favoritar.label = "Desfavoritar" if favorita else "Favoritar"
         self.favoritar.style = discord.ButtonStyle.success if favorita else discord.ButtonStyle.secondary
         # 🔥 Estatística de Torre (2026-09-01, pedido do usuário: "saber
@@ -1942,7 +2490,7 @@ class _ViewNivel(discord.ui.View):
         # nunca usou a Torre.
         andares_vencidos = db.andares_vencidos_personagem(self.guild_id, self.autor_id, self.personagem["id"])
         if andares_vencidos:
-            embed.add_field(name="🗼 Andares vencidos", value=str(andares_vencidos), inline=True)
+            embed.add_field(name="🗼 Andares vencidos", value=_fmt_numero(andares_vencidos), inline=True)
         if self._status:
             embed.description = self._status
         return embed
@@ -2002,17 +2550,17 @@ class _ViewNivel(discord.ui.View):
 
     @discord.ui.button(label="Favoritar", emoji="⭐", style=discord.ButtonStyle.secondary)
     async def favoritar(self, interaction: discord.Interaction, botao: discord.ui.Button):
-        if db.eh_favorita(self.guild_id, self.autor_id, self.personagem["id"]):
-            db.desfavoritar(self.guild_id, self.autor_id, self.personagem["id"])
+        if db.esta_na_wishlist(self.guild_id, self.autor_id, self.personagem["id"]):
+            db.wishlist_remover(self.guild_id, self.autor_id, self.personagem["id"])
             self._status = f"Desmarcada como favorita: **{self.personagem['nome']}**."
         else:
-            db.favoritar(self.guild_id, self.autor_id, self.personagem["id"])
+            db.wishlist_adicionar(self.guild_id, self.autor_id, self.personagem["id"])
             self._status = f"⭐ Marcada como favorita: **{self.personagem['nome']}**."
         await interaction.response.edit_message(embed=self.montar_embed(), view=self)
 
     @discord.ui.button(label="Divorciar", emoji="💔", style=discord.ButtonStyle.danger)
     async def divorciar(self, interaction: discord.Interaction, botao: discord.ui.Button):
-        if db.eh_favorita(self.guild_id, self.autor_id, self.personagem["id"]):
+        if db.esta_na_wishlist(self.guild_id, self.autor_id, self.personagem["id"]):
             async def _confirmar(interacao_confirmacao):
                 await self._divorciar_de_verdade(interacao_confirmacao)
 
@@ -2040,29 +2588,48 @@ class _ViewNivel(discord.ui.View):
         if ok:
             await asyncio.to_thread(cidade.atualizar_snapshot_bonus, self.guild_id, interaction.user.id)
             await asyncio.to_thread(series_favoritas.recalcular_bonus, self.guild_id, interaction.user.id)
-            mensagem = f"💔 Personagem liberada da sua coleção - +{recompensa} WiShards, +{xp} XP de Progressão (Afinidade preservada, um resgate futuro continua com o vínculo)."
+            mensagem = f"💔 Personagem liberada da sua coleção - +{_fmt_numero(recompensa)} WiShards, +{_fmt_numero(xp)} XP de Progressão (Afinidade preservada, um resgate futuro continua com o vínculo)."
         else:
             mensagem = "Você não tem essa personagem nesse servidor."
         await interaction.response.edit_message(content=mensagem, embed=None, view=None)
 
 
-def _fmt_numero(valor, casas_decimais=0):
-    """Formato numérico BR (ponto de milhar, vírgula decimal) - pedido do
-    usuário no exemplo do painel da Cidade ("CP: 191.181", "+0,XX
-    Soulstone/h")."""
-    parte_inteira, _, parte_decimal = f"{valor:,.{casas_decimais}f}".partition(".")
-    parte_inteira = parte_inteira.replace(",", ".")
-    return f"{parte_inteira},{parte_decimal}" if casas_decimais else parte_inteira
+# 🔥 Movido pra `db.fmt_numero` (2026-09-03, pedido do usuário: "separa
+# por . as casas de todos os numeros") - camada mais baixa, importável
+# por `itens.py`/`economia.py`/`gacha.py` também, sem import circular.
+# Alias mantido aqui pra não precisar tocar as dezenas de chamadas já
+# existentes neste arquivo.
+_fmt_numero = db.fmt_numero
 
 
-def _embed_cidade(resultado):
+def _sufixo_aviso_sem_classe(tem_classe):
+    """Sufixo pra mensagem de compra quando a personagem saiu SEM classe
+    (`gacha.comprar_com_revelacao` devolveu `tem_classe=False`) - 2026-09-05,
+    achado do usuário: "as personagens compradas estão vindo sem classe"
+    (mais provável numa compra em lote tipo "Comprar Tudo", já que a cota
+    diária de tokens da Groq só aguenta ~23 classificações reais por dia,
+    ver CHANGELOG). Aponta pro `/pandora_admin validar_classes` (já existia,
+    cobre exatamente esse caso) como retentativa, em vez de ficar
+    silencioso."""
+    if tem_classe:
+        return ""
+    return " ⚠️ Sem classe por enquanto (GAIA sem cota/fora do ar) - `/pandora_admin validar_classes` tenta de novo depois."
+
+
+def _embed_cidade(resultado, guild_id, user_id):
     """Status da Cidade v2 (2026-08-30, efeitos diferenciados por área) -
     `resultado` vem de `cidade.coletar_producao_pendente`. Mostra a
     CAPACIDADE ATUAL de cada área (`taxas_por_funcao` - independente de
     quanto tempo passou desde a última visita, pedido do usuário: "o
     painel deve mostrar sempre o bônus atual por hora, independentemente
     de quanto tempo passou desde a última coleta") - só o resumo do topo
-    mostra o ACUMULADO desde a última visita."""
+    mostra o ACUMULADO desde a última visita.
+
+    🔥 `guild_id`/`user_id` (2026-09-03, pedido do usuário: "informa na
+    cidade o lv dessas construcoes") - o Nível de Construção de cada
+    área (item "Upgrade de Construção", `db.nivel_construcao`/`teto_
+    atual_construcao`) só aparecia no painel "🎒 Inventário" antes; agora
+    também no card de cada área aqui, junto do resto do bônus dela."""
     embed = discord.Embed(title="🏙️ Cidade", color=_COR_HUB)
     if resultado["primeira_visita"]:
         embed.description = (
@@ -2070,11 +2637,13 @@ def _embed_cidade(resultado):
             "Volte depois pra coletar o que suas personagens fora da Party produziram."
         )
         return embed
+    # 🔥 Soulstone antes de XP (2026-09-06, pedido do usuário - troca pura
+    # de ordem de exibição, os 3 valores continuam sendo os mesmos).
     embed.description = (
         f"Desde sua última visita ({resultado['horas']}h atrás):\n"
-        f"+{resultado['wishards']} WiShards\n"
-        f"+{resultado['xp']} XP de Progressão\n"
-        f"+{resultado['soulstone']} Soulstone"
+        f"+{_fmt_numero(resultado['wishards'])} WiShards\n"
+        f"+{_fmt_numero(resultado['soulstone'])} Soulstone\n"
+        f"+{_fmt_numero(resultado['xp'])} XP de Progressão"
     )
     embed.add_field(
         name="👑 Bônus da Coleção",
@@ -2090,11 +2659,11 @@ def _embed_cidade(resultado):
     # Saúde/Cultura/Comércio são taxa POR HORA de verdade (acumulam).
     _TEXTO_BONUS_POR_FUNCAO = {
         "Militar": lambda t: f"+{_fmt_numero(t)} CP fixo para a Party",
-        "Saúde": lambda t: f"+{_fmt_numero(t, 2)} Soulstone/h",
-        "Cultura": lambda t: f"+{_fmt_numero(t, 1)} XP de Progressão/h",
-        "Administração": lambda t: f"+{_fmt_numero(t * 100, 2)}% de eficiência das outras áreas",
-        "Comércio": lambda t: f"+{_fmt_numero(t, 1)} WiShards/h",
-        "Arcano": lambda t: f"+{_fmt_numero(t * 100, 2)}% CP para a Party",
+        "Saúde": lambda t: f"+{_fmt_numero(t)} Soulstone/h",
+        "Cultura": lambda t: f"+{_fmt_numero(t)} XP de Progressão/h",
+        "Administração": lambda t: f"+{_fmt_numero(t * 100)}% de eficiência das outras áreas",
+        "Comércio": lambda t: f"+{_fmt_numero(t)} WiShards/h",
+        "Arcano": lambda t: f"+{_fmt_numero(t * 100)}% CP para a Party",
     }
     # 🔥 SEMPRE lista as 6 áreas, mesmo sem NENHUM trabalhador ainda
     # (2026-09-01, pedido do usuário: "um local que detalhe todos os
@@ -2105,8 +2674,13 @@ def _embed_cidade(resultado):
         dados = resultado["por_funcao"].get(funcao) or {"qtd": 0, "cp": 0.0}
         taxa_atual = resultado["taxas_por_funcao"].get(funcao, 0.0)
         texto_bonus = _TEXTO_BONUS_POR_FUNCAO[funcao](taxa_atual)
+        # 🔥 "Lv{nivel}" no TÍTULO do campo, sem campo/linha própria pra
+        # Construção (2026-09-03, pedido do usuário: "n precisar colocar
+        # o campo construcao, é so por lv X na frente, Ex: ⚔️ Militar -
+        # Lv10").
+        nivel_construcao = db.nivel_construcao(guild_id, user_id, funcao)
         embed.add_field(
-            name=f"{cidade.icone_funcao(funcao)} {funcao}",
+            name=f"{cidade.icone_funcao(funcao)} {funcao} - Lv{nivel_construcao}",
             value=f"Personagens: {dados['qtd']}\nCP: {_fmt_numero(dados['cp'])}\nBônus: {texto_bonus}",
             inline=True,
         )
@@ -2122,8 +2696,8 @@ def _embed_torre(contexto, resultado_final=False):
     cor = 0x2ECC71 if contexto["venceu"] else 0xE74C3C
     titulo = f"🗼 Torre - Andar {andar}"
     embed = discord.Embed(title=titulo, color=cor)
-    embed.add_field(name="Power da Party", value=f"{contexto['power_total']:.0f}", inline=True)
-    embed.add_field(name="Power necessário", value=f"{contexto['alvo']}", inline=True)
+    embed.add_field(name="Power da Party", value=_fmt_numero(contexto["power_total"]), inline=True)
+    embed.add_field(name="Power necessário", value=_fmt_numero(contexto["alvo"]), inline=True)
     restricao_txt = torre.descricao_restricao(contexto["restricao"])
     if contexto.get("restricao_ignorada"):
         restricao_txt += " · 🗝️ ignorada (Chave da Torre)"
@@ -2134,14 +2708,36 @@ def _embed_torre(contexto, resultado_final=False):
     for m in contexto["membros"]:
         vinculo = "💞 Soulmate" if m["is_soulmate"] else f"❤️{m['afinidade']}"
         icone = torre.icone_categoria(m["categoria_combate"])
-        linhas_membros.append(f"{icone} - {m['nome']} - Nv.{m['nivel']} · {vinculo} · CP {m['power']:.0f}")
+        linhas_membros.append(f"{icone} - {m['nome']} - Nv.{m['nivel']} · {vinculo} · CP {_fmt_numero(m['power'])}")
     embed.add_field(name="Sua Party", value="\n".join(linhas_membros), inline=False)
     if resultado_final:
         if contexto["venceu"]:
-            embed.description = f"✅ **Vitória!** +{contexto['recompensa']} WiShards (saldo: {contexto['novo_saldo']}), +{contexto['xp_ganho']} XP de Progressão - avançou pro andar {contexto['novo_andar']}."
+            embed.description = f"✅ **Vitória!** +{_fmt_numero(contexto['recompensa'])} WiShards (saldo: {_fmt_numero(contexto['novo_saldo'])}), +{_fmt_numero(contexto['xp_ganho'])} XP de Progressão - avançou pro andar {contexto['novo_andar']}."
         else:
             embed.description = "❌ **Derrota.** Suba de nível/Afinidade ou ajuste a Party e tente de novo - sem RNG, sem cooldown."
     return embed
+
+
+def _resumo_subir_max(resumo):
+    """Texto de resumo do "Subir Max" (2026-09-04) - `resumo` é o dict
+    devolvido por `torre.subir_max`. Usado como `embed.description` sobre
+    o preview do andar em que parou (mesma composição de texto que
+    `_embed_torre(resultado_final=True)` usa pra 1 andar só, só que
+    cobrindo VÁRIOS andares de uma vez)."""
+    if resumo["andares_subidos"] > 0:
+        texto = (
+            f"⏫ Subiu **{resumo['andares_subidos']} andar(es)** (do {resumo['andar_inicial']} pro {resumo['andar_final']})! "
+            f"+{_fmt_numero(resumo['recompensa_total'])} WiShards, +{_fmt_numero(resumo['xp_total'])} XP de Progressão."
+        )
+    else:
+        texto = f"⏫ Não conseguiu vencer nem o Andar {resumo['andar_inicial']} com a melhor Party possível."
+    if resumo["motivo_parada"] == "restricao_impossivel":
+        texto += f"\n❌ Travou no Andar {resumo['andar_final']}: {resumo['restricao_travada']} - falta personagem(ns) dessa categoria na sua coleção."
+    elif resumo["motivo_parada"] == "power_insuficiente":
+        texto += f"\n❌ Travou no Andar {resumo['andar_final']} por Power insuficiente - suba Nível/Afinidade ou invista na Progressão Global."
+    elif resumo["motivo_parada"] == "limite_seguranca":
+        texto += "\n⚠️ Parou no limite de segurança de andares por chamada - clique em Subir Max de novo pra continuar."
+    return texto
 
 
 class _ViewTorre(discord.ui.View):
@@ -2169,6 +2765,30 @@ class _ViewTorre(discord.ui.View):
         # (`db.andar_atual_torre`), então clicar "Subir" de novo já ataca
         # o próximo andar automaticamente se o anterior foi vencido.
         await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Subir Max", emoji="⏫", style=discord.ButtonStyle.success)
+    async def subir_max(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        """"Subir Max" (2026-09-04, pedido do usuário: "usado Subir torre
+        ate o máximo possível mas seguindo as regras por andar e trocando
+        de time p considerar ela") - `torre.subir_max` sobe em loop até
+        perder, trocando a Party automaticamente a cada mudança de
+        restrição (nunca precisa clicar "Auto-Party" na mão pra cada
+        padrão diferente). Mesmo `defer()` + `to_thread` do "Auto-Party" -
+        o loop varre a coleção inteira 1x e pode escrever no banco várias
+        vezes, bloquearia o event loop do processo INTEIRO sem isso (mesma
+        causa raiz já corrigida lá)."""
+        await interaction.response.defer()
+        resumo = await asyncio.to_thread(torre.subir_max, self.guild_id, interaction.user.id)
+        if resumo["andares_subidos"] > 0:
+            await asyncio.to_thread(cidade.atualizar_snapshot_bonus, self.guild_id, interaction.user.id)
+            await asyncio.to_thread(series_favoritas.recalcular_bonus, self.guild_id, interaction.user.id)
+        _ok, _erro, contexto = torre.preview_andar(self.guild_id, interaction.user.id)
+        if contexto is None:
+            await interaction.followup.send("Você ainda não tem nenhuma personagem pra montar uma Party.", ephemeral=True)
+            return
+        embed = _embed_torre(contexto)
+        embed.description = _resumo_subir_max(resumo)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Auto-Party", emoji="🤖", style=discord.ButtonStyle.secondary)
     async def auto_party(self, interaction: discord.Interaction, botao: discord.ui.Button):
@@ -2274,7 +2894,7 @@ class ViewColecaoHub(consulta.ViewColecao):
     def _linha_com_cp(self, _indice, personagem):
         power, _nivel, categoria = torre.power_personagem(personagem, self._guild.id, self._membro.id)
         icone = torre.icone_categoria(categoria)
-        return f"{icone} - {consulta.linha_personagem(personagem)} · CP {power:.0f}"
+        return f"{icone} - {consulta.linha_personagem(personagem)} · CP {_fmt_numero(power)}"
 
     def _montar(self):
         super()._montar()
@@ -2434,82 +3054,383 @@ def _embed_resultado_prova(contexto):
     return embed
 
 
-class ViewFavoritosHub(consulta.ViewColecao):
-    """Lista paginada dos favoritos (2026-09-02, pedido do usuário: "quero
-    q tenha uma lista com meus personagens favoritos, assim como tem so
-    de personagens, e poe ela e a wishlist dentro do perfil") - herda
-    `ViewColecao` (mesma paginação ◀️/▶️ de "📚 Minha coleção"), sem botão
-    nenhum a mais - favoritar/desfavoritar continua exclusivo do card
-    "🔍 Personagem" (`_ViewNivel.favoritar`), nunca por aqui."""
+class ViewWishlistHub(discord.ui.View):
+    """Navegador de Wishlist (2026-09-03, pedido do usuário: "A wishlist
+    tem q ser igual a tela de personagem, mostrando imagem e com os msm
+    botoes") - MESMO card (`consulta.embed_carta_personagem`) + navegação
+    por posição/bloco/busca do "🔍 Personagem" (`_ViewNivel`), agora sobre
+    a lista da Wishlist (favoritos, tabela `colecao_favoritas`) em vez da
+    coleção inteira. Como a Wishlist aceita personagem NÃO possuída desde
+    a fusão Favoritos+Wishlist, cada card ganha os mesmos 3 ESTADOS de
+    posse do navegador de Série (`_ViewNavegarSerie`): 🛒 Livre (botão
+    "Comprar" habilitado, `gacha.comprar_com_revelacao`), ✅ Já é sua (Upar
+    Nível/Afinidade/Divorciar habilitados, mesmo fluxo de `_ViewNivel`) ou
+    🔒 De outro jogador (só "Desfavoritar"/"Atualizar" continuam ativos).
+    "Desfavoritar" aqui NUNCA alterna pra "Favoritar" - tudo mostrado
+    nesta tela já está na Wishlist por definição, só sai dela.
 
-    def __init__(self, guild_id, autor_id):
-        super().__init__("⭐ Seus favoritos", db.favoritos_listar(guild_id, autor_id))
+    A lista inteira já vem carregada de 1 vez (`db.wishlist_listar` não
+    usa `OFFSET`/`LIMIT` - Wishlist é curada à mão pelo jogador, nunca do
+    tamanho da coleção inteira) - só FATIADA em blocos de 25 pro select
+    (mesmo teto de sempre); cada navegação (`_ir_para`) recarrega a lista
+    inteira do banco de novo (barato) pra refletir qualquer adição/
+    remoção feita fora dessa tela enquanto ela estava aberta.
 
+    Lista vazia NUNCA fecha a tela (diferente de `_ViewNivel.criar`, que
+    devolve `None` se a coleção estiver vazia) - "➕ Adicionar" continua
+    disponível, é o único jeito de colocar a 1ª personagem."""
 
-class ViewWishlistHub(consulta.ViewColecao):
-    """Wishlist paginada (herda `ViewColecao`, mesma paginação ◀️/▶️) +
-    botão "➕ Adicionar" (`discord.ui.Modal` com o nome) e select "🗑
-    Remover" (até 25 da PÁGINA atual, mesmo teto de sempre).
+    @classmethod
+    async def criar(cls, guild_id, autor_id, indice=0):
+        """Fábrica assíncrona (View nunca pode ser construída dentro de um
+        `to_thread`, mesmo motivo de `_ViewNivel.criar`)."""
+        personagens = await asyncio.to_thread(db.wishlist_listar, guild_id, autor_id)
+        return cls(guild_id, autor_id, personagens, indice)
 
-    🔥 "✨" à direita de quem já tem dono (2026-08-29, pedido do usuário:
-    "coloca aquele emoji de brilho na direita dos q ja foram pegos") -
-    `db.wishlist_disponiveis_no_guild` já exclui quem tem dono da chance de
-    vir num wish-roll, mas o item continua na wishlist até ser removido à
-    mão; o "✨" deixa claro por que ele parou de aparecer nos rolls."""
-
-    def __init__(self, guild_id, autor_id):
+    def __init__(self, guild_id, autor_id, personagens, indice=0):
+        super().__init__(timeout=180)
         self.guild_id = guild_id
         self.autor_id = str(autor_id)
-        formatador = lambda indice, p: consulta.linha_personagem(p) + (" ✨" if db.dono_do_personagem(guild_id, p["id"]) is not None else "")
-        super().__init__("⭐ Sua wishlist", db.wishlist_listar(guild_id, autor_id), formatador_linha=formatador)
+        self._personagens = personagens
+        self._indice = max(0, min(len(personagens) - 1, indice)) if personagens else 0
+        self._bloco_offset = (self._indice // 25) * 25
+        self._status = None
 
-    def _recarregar(self):
-        self._personagens = db.wishlist_listar(self.guild_id, self.autor_id)
-        if self._pagina >= self._total_paginas:
-            self._pagina = max(0, self._total_paginas - 1)
+        self._select = discord.ui.Select(placeholder="🔄 Trocar de personagem...", options=[discord.SelectOption(label="-", value="0")], row=1)
+        self._select.callback = self._trocar_personagem
+        self.add_item(self._select)
 
-    def _montar(self):
-        super()._montar()
-        adicionar = discord.ui.Button(label="Adicionar", emoji="➕", style=discord.ButtonStyle.success, row=1)
-        adicionar.callback = self._abrir_modal_adicionar
-        self.add_item(adicionar)
-        pagina_atual = self._pagina_atual()
-        if pagina_atual:
-            # 🔥 `max_values` (2026-09-02, pedido do usuário: "Remover da
-            # wishlist tem de permitir selecionar varios por vez") - era
-            # `min_values`/`max_values` padrão (1/1, só 1 por vez); agora
-            # seleciona de 1 até TODOS da página atual numa tacada só.
-            remover = discord.ui.Select(
-                placeholder="Remover da wishlist...",
-                options=[discord.SelectOption(label=p["nome"][:100], value=str(p["id"])) for p in pagina_atual],
-                min_values=1, max_values=len(pagina_atual),
-                row=2,
-            )
-            remover.callback = self._remover_selecionado
-            self.add_item(remover)
+        self._botao_bloco_anterior = discord.ui.Button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=2)
+        self._botao_bloco_anterior.callback = self._ir_bloco_anterior
+        self.add_item(self._botao_bloco_anterior)
+        self._botao_anterior = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
+        self._botao_anterior.callback = self._navegar_anterior
+        self.add_item(self._botao_anterior)
+        self._botao_proximo = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary, row=2)
+        self._botao_proximo.callback = self._navegar_proximo
+        self.add_item(self._botao_proximo)
+        self._botao_bloco_seguinte = discord.ui.Button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=2)
+        self._botao_bloco_seguinte.callback = self._ir_bloco_seguinte
+        self.add_item(self._botao_bloco_seguinte)
+        self._botao_buscar = discord.ui.Button(label="Buscar", emoji="🔎", style=discord.ButtonStyle.primary, row=2)
+        self._botao_buscar.callback = self._abrir_busca
+        self.add_item(self._botao_buscar)
+
+        self._botao_comprar = discord.ui.Button(label="Comprar", emoji="🛒", style=discord.ButtonStyle.success, row=3)
+        self._botao_comprar.callback = self._comprar
+        self.add_item(self._botao_comprar)
+        self._botao_adicionar = discord.ui.Button(label="Adicionar", emoji="➕", style=discord.ButtonStyle.secondary, row=3)
+        self._botao_adicionar.callback = self._abrir_modal_adicionar
+        self.add_item(self._botao_adicionar)
+
+        self._atualizar_select_options()
+
+    @property
+    def personagem(self):
+        return self._personagens[self._indice] if self._personagens else None
+
+    async def _somente_autor(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.autor_id:
+            await interaction.response.send_message("Essa Wishlist não é sua.", ephemeral=True)
+            return False
+        return True
+
+    def _atualizar_select_options(self):
+        if not self._personagens:
+            self._select.options = [discord.SelectOption(label="-", value="0")]
+            self._select.placeholder = "Wishlist vazia..."
+            return
+        contexto_lote = torre._contexto_lote(self.guild_id, self.autor_id)
+        bloco = self._personagens[self._bloco_offset:self._bloco_offset + 25]
+        options = []
+        for indice, p in enumerate(bloco):
+            texto, emoji = _descricao_personagem_dropdown(p, self.guild_id, self.autor_id, contexto_lote)
+            posicao_absoluta = self._bloco_offset + indice + 1
+            options.append(discord.SelectOption(
+                label=f"{posicao_absoluta}. {p['nome']}"[:100], description=texto[:100], value=str(indice),
+                emoji=emoji, default=(self._bloco_offset + indice == self._indice),
+            ))
+        self._select.options = options
+        self._select.placeholder = f"🔄 Trocar de personagem (bloco {self._bloco_offset + 1}-{self._bloco_offset + len(bloco)})..."
+
+    async def _ir_para(self, indice_alvo):
+        """Núcleo de TODA navegação - recarrega a Wishlist INTEIRA do
+        banco a cada passo (barato, é curada à mão, nunca do tamanho da
+        coleção completa), pra refletir qualquer adição/remoção feita
+        fora dessa tela enquanto ela estava aberta. `False` só se a
+        Wishlist ficou vazia."""
+        personagens = await asyncio.to_thread(db.wishlist_listar, self.guild_id, self.autor_id)
+        self._personagens = personagens
+        if not personagens:
+            self._indice = 0
+            self._bloco_offset = 0
+            self._atualizar_select_options()
+            return False
+        self._indice = max(0, min(len(personagens) - 1, indice_alvo))
+        self._bloco_offset = (self._indice // 25) * 25
+        self._status = None
+        self._atualizar_select_options()
+        return True
+
+    async def _renderizar(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    async def _trocar_personagem(self, interaction: discord.Interaction):
+        await self._ir_para(self._bloco_offset + int(interaction.data["values"][0]))
+        await self._renderizar(interaction)
+
+    async def _navegar_anterior(self, interaction: discord.Interaction):
+        await self._ir_para(self._indice - 1)
+        await self._renderizar(interaction)
+
+    async def _navegar_proximo(self, interaction: discord.Interaction):
+        await self._ir_para(self._indice + 1)
+        await self._renderizar(interaction)
+
+    async def _ir_bloco_anterior(self, interaction: discord.Interaction):
+        await self._ir_para(max(0, self._bloco_offset - 25))
+        await self._renderizar(interaction)
+
+    async def _ir_bloco_seguinte(self, interaction: discord.Interaction):
+        await self._ir_para(self._bloco_offset + 25)
+        await self._renderizar(interaction)
+
+    async def _abrir_busca(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(_ModalBuscarPosicaoOuNomeWishlist(self))
 
     async def _abrir_modal_adicionar(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != self.autor_id:
-            await interaction.response.send_message("Essa wishlist não é sua.", ephemeral=True)
+        if not await self._somente_autor(interaction):
             return
         await interaction.response.send_modal(_ModalAdicionarWishlist(self))
 
-    async def _remover_selecionado(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != self.autor_id:
-            await interaction.response.send_message("Essa wishlist não é sua.", ephemeral=True)
+    def montar_embed(self):
+        if not self._personagens:
+            for botao in (
+                self._botao_anterior, self._botao_proximo, self._botao_bloco_anterior, self._botao_bloco_seguinte,
+                self._botao_buscar, self._botao_comprar, self.upar, self.upar_afinidade, self.favoritar, self.divorciar,
+            ):
+                botao.disabled = True
+            self._select.disabled = True
+            return discord.Embed(
+                title="💖 Sua Wishlist", color=_COR_HUB,
+                description=self._status or "Vazia - use ➕ Adicionar pra colocar a 1ª personagem.",
+            )
+        self._select.disabled = False
+        self._botao_anterior.disabled = self._indice <= 0
+        self._botao_proximo.disabled = self._indice >= len(self._personagens) - 1
+        self._botao_bloco_anterior.disabled = self._bloco_offset <= 0
+        self._botao_bloco_seguinte.disabled = self._bloco_offset + 25 >= len(self._personagens)
+        personagem = self.personagem
+        embed = consulta.embed_carta_personagem(personagem)
+        embed.set_footer(text=f"{self._indice + 1}/{len(self._personagens)} · Wishlist")
+        self.favoritar.label = "Desfavoritar"
+        self.favoritar.style = discord.ButtonStyle.success
+        dono_id = personagem.get("dono_id")
+        if dono_id is None:
+            preco = db.PRECOS_LOJA[personagem["raridade"]]
+            embed.add_field(name="Status", value=f"🛒 Disponível - {_fmt_numero(preco)} WiShards", inline=True)
+            self._botao_comprar.disabled = False
+            self._botao_comprar.label = f"Comprar ({_fmt_numero(preco)})"
+            self.upar.disabled = True
+            self.upar_afinidade.disabled = True
+            self.divorciar.disabled = True
+        elif dono_id == self.autor_id:
+            self._botao_comprar.disabled = True
+            self._botao_comprar.label = "Já é sua"
+            nivel_atual = db.nivel_personagem(self.guild_id, self.autor_id, personagem["id"])
+            custo = db.custo_proximo_nivel(personagem["raridade"], nivel_atual)
+            power, _nivel_ignorado, categoria = torre.power_personagem(personagem, self.guild_id, self.autor_id)
+            embed.add_field(name="Status", value="✅ Já é sua", inline=True)
+            embed.add_field(name="CP", value=f"{torre.icone_categoria(categoria)} {_fmt_numero(power)}", inline=True)
+            if custo is None:
+                embed.add_field(name="Nível", value=f"{nivel_atual} (máximo)", inline=True)
+                self.upar.disabled = True
+            else:
+                embed.add_field(name="Nível", value=f"{nivel_atual} (próximo: {_fmt_numero(custo)} WiShards)", inline=True)
+                self.upar.disabled = False
+            afinidade_atual = db.afinidade(self.guild_id, self.autor_id, personagem["id"])
+            custo_afinidade = db.custo_proximo_afinidade(afinidade_atual)
+            if custo_afinidade is None:
+                embed.add_field(name="Afinidade", value=f"{afinidade_atual} (máxima)", inline=True)
+                self.upar_afinidade.disabled = True
+            else:
+                embed.add_field(name="Afinidade", value=f"{afinidade_atual} (próximo: {_fmt_numero(custo_afinidade)} Soulstone)", inline=True)
+                self.upar_afinidade.disabled = False
+            andares_vencidos = db.andares_vencidos_personagem(self.guild_id, self.autor_id, personagem["id"])
+            if andares_vencidos:
+                embed.add_field(name="🗼 Andares vencidos", value=_fmt_numero(andares_vencidos), inline=True)
+            self.divorciar.disabled = False
+        else:
+            embed.add_field(name="Status", value=f"🔒 Possuída por <@{dono_id}>", inline=True)
+            self._botao_comprar.disabled = True
+            self._botao_comprar.label = "Indisponível"
+            self.upar.disabled = True
+            self.upar_afinidade.disabled = True
+            self.divorciar.disabled = True
+        if self._status:
+            embed.description = self._status
+        return embed
+
+    @discord.ui.button(label="Upar Nível", emoji="⬆️", style=discord.ButtonStyle.success)
+    async def upar(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        """Mesmo dropdown de `_ViewNivel.upar` - `db.subir_nivel_ate` já
+        soma o custo de TODOS os degraus até o alvo."""
+        personagem = self.personagem
+        nivel_atual = db.nivel_personagem(self.guild_id, self.autor_id, personagem["id"])
+        raridade = personagem["raridade"]
+
+        async def _confirmar(interacao_confirmacao, alvo):
+            ok, mensagem = db.subir_nivel_ate(self.guild_id, interacao_confirmacao.user.id, personagem["id"], alvo)
+            if ok:
+                await asyncio.to_thread(cidade.atualizar_snapshot_bonus, self.guild_id, interacao_confirmacao.user.id)
+                await asyncio.to_thread(series_favoritas.recalcular_bonus, self.guild_id, interacao_confirmacao.user.id)
+            self._status = f"{'✅' if ok else '❌'} {mensagem}"
+            await interacao_confirmacao.response.edit_message(embed=self.montar_embed(), view=self)
+
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(embed=self.montar_embed(), view=self)
+
+        view_escolher = _ViewEscolherAlvo(
+            "Nível", nivel_atual, db.NIVEL_MAXIMO_PERSONAGEM,
+            lambda alvo: db.custo_total_ate_nivel(raridade, nivel_atual, alvo),
+            "WiShards", _confirmar, _cancelar,
+            saldo_atual=db.saldo_wishards(self.guild_id, self.autor_id),
+        )
+        await interaction.response.edit_message(embed=self.montar_embed(), view=view_escolher)
+
+    @discord.ui.button(label="Aumentar Afinidade", emoji="💕", style=discord.ButtonStyle.success)
+    async def upar_afinidade(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        """Mesmo dropdown de "Upar Nível", pra Afinidade/Soulstone."""
+        personagem = self.personagem
+        afinidade_atual = db.afinidade(self.guild_id, self.autor_id, personagem["id"])
+
+        async def _confirmar(interacao_confirmacao, alvo):
+            ok, mensagem = db.subir_afinidade_ate(self.guild_id, interacao_confirmacao.user.id, personagem["id"], alvo)
+            if ok:
+                await asyncio.to_thread(cidade.atualizar_snapshot_bonus, self.guild_id, interacao_confirmacao.user.id)
+                await asyncio.to_thread(series_favoritas.recalcular_bonus, self.guild_id, interacao_confirmacao.user.id)
+            self._status = f"{'✅' if ok else '❌'} {mensagem}"
+            await interacao_confirmacao.response.edit_message(embed=self.montar_embed(), view=self)
+
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(embed=self.montar_embed(), view=self)
+
+        view_escolher = _ViewEscolherAlvo(
+            "Afinidade", afinidade_atual, db.NIVEL_MAXIMO_AFINIDADE,
+            lambda alvo: db.custo_total_ate_afinidade(afinidade_atual, alvo),
+            "Soulstone", _confirmar, _cancelar,
+            saldo_atual=db.saldo_soulstone(self.guild_id, self.autor_id),
+        )
+        await interaction.response.edit_message(embed=self.montar_embed(), view=view_escolher)
+
+    @discord.ui.button(label="Desfavoritar", emoji="⭐", style=discord.ButtonStyle.success)
+    async def favoritar(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        """SEMPRE remove - tudo mostrado nesta tela já está na Wishlist
+        por definição, diferente do `favoritar` do "🔍 Personagem"/
+        navegador de Série (esses alternam, porque podem mostrar
+        personagem ainda não favoritada)."""
+        personagem = self.personagem
+        db.wishlist_remover(self.guild_id, self.autor_id, personagem["id"])
+        nome = personagem["nome"]
+        await self._ir_para(self._indice)
+        self._status = f"Removida da Wishlist: **{nome}**."
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    @discord.ui.button(label="Divorciar", emoji="💔", style=discord.ButtonStyle.danger)
+    async def divorciar(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        """Sempre pede confirmação - tudo mostrado aqui já está
+        favoritado/na Wishlist por definição (mesmo aviso que `_ViewNivel.
+        divorciar` só mostra condicionalmente lá, aqui é sempre)."""
+        async def _confirmar(interacao_confirmacao):
+            await self._divorciar_de_verdade(interacao_confirmacao)
+
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(embed=self.montar_embed(), view=self)
+
+        embed_aviso = self.montar_embed()
+        embed_aviso.description = "⚠️ Essa personagem está favoritada - tem certeza que quer divorciar mesmo assim?"
+        view_confirmar = _ViewConfirmar(_confirmar, ao_cancelar=_cancelar)
+        await interaction.response.edit_message(embed=embed_aviso, view=view_confirmar)
+
+    @discord.ui.button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def atualizar(self, interaction: discord.Interaction, botao: discord.ui.Button):
+        await self._ir_para(self._indice)
+        await interaction.response.edit_message(embed=self.montar_embed(), view=self)
+
+    async def _divorciar_de_verdade(self, interaction: discord.Interaction):
+        personagem = self.personagem
+        ok, recompensa, xp = db.divorciar(self.guild_id, personagem["id"], interaction.user.id)
+        if ok:
+            await asyncio.to_thread(cidade.atualizar_snapshot_bonus, self.guild_id, interaction.user.id)
+            await asyncio.to_thread(series_favoritas.recalcular_bonus, self.guild_id, interaction.user.id)
+            mensagem = f"💔 Personagem liberada da sua coleção - +{_fmt_numero(recompensa)} WiShards, +{_fmt_numero(xp)} XP de Progressão (Afinidade preservada, um resgate futuro continua com o vínculo)."
+        else:
+            mensagem = "Você não tem essa personagem nesse servidor."
+        await interaction.response.edit_message(content=mensagem, embed=None, view=None)
+
+    async def _comprar(self, interaction: discord.Interaction):
+        """Mesmo `gacha.comprar_com_revelacao` do navegador de Série
+        (`_ViewNavegarSerie._comprar`) - MESMA regra/preço/corrida da Loja
+        de verdade, já revelando classe se for a 1ª vez que essa
+        personagem é reivindicada em qualquer servidor."""
+        personagem = self.personagem
+        await interaction.response.defer()
+        ok, mensagem, tem_classe = await gacha.comprar_com_revelacao(self.guild_id, personagem["id"], interaction.user)
+        if ok:
+            personagem["dono_id"] = str(interaction.user.id)
+            mensagem += _sufixo_aviso_sem_classe(tem_classe)
+        self._status = f"{'✅' if ok else '❌'} {mensagem}"
+        await interaction.edit_original_response(embed=self.montar_embed(), view=self)
+
+
+class _ModalBuscarPosicaoOuNomeWishlist(discord.ui.Modal, title="Buscar personagem"):
+    """"🔎 Buscar" da Wishlist (2026-09-03) - mesmo Modal de posição/nome
+    de `_ModalBuscarPosicaoOuNomeSerie`, resolvendo posição dentro da
+    Wishlist do jogador em vez do catálogo de uma série."""
+
+    consulta_texto = discord.ui.TextInput(label="Nome ou posição (nº)", placeholder="Ex.: Megumin ou 5", max_length=100)
+
+    def __init__(self, view):
+        super().__init__()
+        self._view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        texto = str(self.consulta_texto).strip()
+        if not texto:
+            await interaction.followup.send("Digite um nome ou uma posição.", ephemeral=True)
             return
-        for id_personagem in interaction.data["values"]:
-            db.wishlist_remover(self.guild_id, self.autor_id, int(id_personagem))
-        self._recarregar()
-        self._montar()
-        await interaction.response.edit_message(content=self.formatar(), view=self)
+        if texto.isdigit():
+            posicao = int(texto)
+            if posicao < 1:
+                await interaction.followup.send("Posição inválida - use um número a partir de 1.", ephemeral=True)
+                return
+            indice_alvo = posicao - 1
+        else:
+            personagens_atualizados = await asyncio.to_thread(db.wishlist_listar, self._view.guild_id, self._view.autor_id)
+            melhores = consulta.buscar_por_nome(personagens_atualizados, texto, limite=1)
+            if not melhores:
+                await interaction.followup.send(f'Nenhuma personagem parecida com "{texto}" na sua Wishlist.', ephemeral=True)
+                return
+            alvo_id = melhores[0]["id"]
+            indice_alvo = next(i for i, p in enumerate(personagens_atualizados) if p["id"] == alvo_id)
+        ok = await self._view._ir_para(indice_alvo)
+        if not ok:
+            await interaction.followup.send("Sua Wishlist está vazia.", ephemeral=True)
+            return
+        if self._view._indice != indice_alvo:
+            self._view._status = f"⚠️ Só existem {len(self._view._personagens)} personagem(ns) na sua Wishlist - mostrando a posição {self._view._indice + 1}."
+        await interaction.edit_original_response(embed=self._view.montar_embed(), view=self._view)
 
 
-class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar à wishlist"):
-    """Campo único MULTI-LINHA (2026-09-01, pedido do usuário: "alterar
-    forma de adicionar wishlist por uma mais fácil e rápido p incluir
-    mais de 1") - 1 nome por linha, processa todos numa submissão só (
-    antes precisava reabrir o Modal pra cada personagem)."""
+class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar aos Favoritos/Wishlist"):
+    """Campo único MULTI-LINHA (2026-09-01, pedido original da Wishlist:
+    "alterar forma de adicionar wishlist por uma mais fácil e rápido p
+    incluir mais de 1") - 1 nome por linha, processa todos numa submissão
+    só. Único jeito de favoritar/wishlistar uma personagem que você AINDA
+    NÃO possui (`db.wishlist_adicionar` não exige posse desde a fusão de
+    2026-09-03) - pra quem já possui, o card "🔍 Personagem" continua mais
+    rápido (é o "emote e botão fácil" que o usuário pediu pra manter)."""
 
     nomes = discord.ui.TextInput(
         label="Nomes (1 por linha)", style=discord.TextStyle.paragraph,
@@ -2527,6 +3448,7 @@ class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar à wishlist"):
             return
 
         adicionados, ambiguos, nao_encontrados = [], [], []
+        ultimo_id_adicionado = None
         for nome in linhas_nomes:
             resultados = await asyncio.to_thread(db.buscar_personagens, nome)
             if not resultados:
@@ -2536,20 +3458,28 @@ class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar à wishlist"):
             else:
                 await asyncio.to_thread(db.wishlist_adicionar, self._view_wishlist.guild_id, interaction.user.id, resultados[0]["id"])
                 adicionados.append(resultados[0]["nome"])
+                ultimo_id_adicionado = resultados[0]["id"]
 
         partes = []
         if adicionados:
             partes.append(f"✅ Adicionados: {', '.join(adicionados)}")
         if ambiguos:
-            partes.append(f"⚠️ Mais de 1 resultado (use `/wishlist adicionar` com #id): {', '.join(ambiguos)}")
+            partes.append(f"⚠️ Mais de 1 resultado (use `/favoritar` com #id): {', '.join(ambiguos)}")
         if nao_encontrados:
             partes.append(f"❌ Não encontrados: {', '.join(nao_encontrados)}")
 
-        self._view_wishlist._recarregar()
-        self._view_wishlist._montar()
-        await interaction.response.edit_message(
-            content=f"{chr(10).join(partes)}\n\n{self._view_wishlist.formatar()}", view=self._view_wishlist,
-        )
+        # 🔥 Reabre já em cima do último adicionado (2026-09-03, tela virou
+        # card único - `wishlist_listar` ordena por popularidade, não por
+        # ordem de inserção, então achar a posição de novo depois de
+        # recarregar é o único jeito de saber onde ele caiu na lista).
+        await self._view_wishlist._ir_para(0)
+        if ultimo_id_adicionado is not None:
+            for indice, p in enumerate(self._view_wishlist._personagens):
+                if p["id"] == ultimo_id_adicionado:
+                    await self._view_wishlist._ir_para(indice)
+                    break
+        self._view_wishlist._status = "\n".join(partes) if partes else None
+        await interaction.response.edit_message(content=None, embed=self._view_wishlist.montar_embed(), view=self._view_wishlist)
 
 
 class _ViewFiltrarCategoria(discord.ui.View):
@@ -2582,10 +3512,12 @@ class _ViewFiltrarCategoria(discord.ui.View):
 class ViewEquipe(discord.ui.View):
     """Painel de Party (2026-08-29) - SEM `/party` nem `/pandora party`, só
     alcançável pelo botão 👥 Party do hub (mesmo modelo do `Grupos` do LA -
-    zero comando raiz). `tipo` fixo em "party" nesta leva - Vitrine
-    reaproveita a MESMA tabela via `db.obter_equipe(..., "vitrine")`, mas
-    ainda não tem botão no hub (fica pra depois, `/vitrine` continua sendo
-    o único jeito de ver/editar por enquanto).
+    zero comando raiz). `tipo` fixo em "party" - a Vitrine (que reaproveitava
+    a MESMA tabela via `tipo="vitrine"`) foi REMOVIDA em 2026-09-03,
+    substituída em espírito por 💖 Personagens Favoritas
+    (`pandora.personagens_favoritas`) - `colecao_equipe` continua genérica
+    por `tipo`, sem migração (linhas antigas com `tipo="vitrine"`, se
+    existirem, ficam órfãs e inertes).
 
     🔥 SEM botão por slot numerado (2026-08-29, corrigido depois do
     usuário perguntar "ter q selecionar 1 por vez em cada slot tem alguma
@@ -2625,7 +3557,7 @@ class ViewEquipe(discord.ui.View):
         def linha(personagem):
             power, nivel, categoria = torre.power_personagem(personagem, self.guild_id, self.autor_id)
             icone = torre.icone_categoria(categoria)
-            return f"{icone} - {consulta.linha_personagem(personagem)} · Nv.{nivel} · CP {power:.0f}"
+            return f"{icone} - {consulta.linha_personagem(personagem)} · Nv.{nivel} · CP {_fmt_numero(power)}"
 
         return consulta.formatar_equipe("Sua Party", equipe, db.MAX_POSICOES_EQUIPE, formatador_linha=linha)
 
@@ -2652,33 +3584,48 @@ class ViewEquipe(discord.ui.View):
         async def prosseguir(interaction_filtro: discord.Interaction, categoria):
             # 🔥 `defer()` ANTES de qualquer trabalho síncrono (2026-09-03,
             # achado do usuário: "Ao selecionar role da personagem p por
-            # na pt, GAIA n responde a tempo") - filtrar por categoria
-            # chama `torre.categoria_personagem` (1 query síncrona por
-            # personagem candidata, sem `to_thread`) ANTES de qualquer
-            # resposta à interação - mesma classe de bug (trabalho
-            # bloqueante antes do 1º ack) já corrigida várias vezes nesta
-            # sessão. Interação de Select vira `deferred_message_update`
-            # (edita a MESMA mensagem do filtro) - `edit_original_response`
-            # no lugar de `response.edit_message`/`send_message` depois.
+            # na pt, GAIA n responde a tempo") - mesma classe de bug
+            # (trabalho bloqueante antes do 1º ack) já corrigida várias
+            # vezes nesta sessão. Interação de Select vira `deferred_
+            # message_update` (edita a MESMA mensagem do filtro) - `edit_
+            # original_response` no lugar de `response.edit_message`/
+            # `send_message` depois.
             await interaction_filtro.response.defer()
+            # 🔥 1 SÓ `_contexto_lote` reaproveitado pros 3 passos - filtro,
+            # ordenação e descrição do dropdown (2026-09-06, achado do
+            # usuário: "apos colocar a role, demora um pouco p aparecer as
+            # personagens daquela role") - antes, filtrar por categoria
+            # chamava `torre.categoria_personagem(p)` (que faz sua PRÓPRIA
+            # consulta `db.categoria_combate_da_classe`) UMA VEZ POR
+            # PERSONAGEM candidata, mesmo repetindo a mesma classe centenas
+            # de vezes (exatamente o padrão "44 Guerreiro = 44 conexões
+            # SQLite idênticas" já identificado e corrigido em outros
+            # pontos deste arquivo/`cidade.py`, nunca corrigido aqui) -
+            # `ordenar_por_power` então abria OUTRA consulta em lote pra se
+            # ordenar, e por fim uma 3ª só pra descrever o dropdown. Agora
+            # é 1 consulta em lote só, reaproveitada nos 3 passos.
+            contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, self.autor_id)
             if categoria is None:
                 filtrados = candidatos
             else:
-                filtrados = await asyncio.to_thread(
-                    lambda: [p for p in candidatos if torre.categoria_personagem(p) == categoria],
-                )
+                cache_classe = contexto_lote[2]
+                filtrados = [
+                    p for p in candidatos
+                    if cache_classe.get(p.get("classe"), (None, None, None))[1] == categoria
+                ]
             # 🔥 ordena por CP ANTES de cortar em 25 (2026-08-30, pedido do
             # usuário: "Todo dropdwon q listar waifu, sempre ordene pelas
             # com maior CP/popularidade") - via thread (2026-08-30,
             # achado do usuário: "GAIA não respondeu a tempo" repetido,
             # mesma causa das outras varreduras de coleção inteira).
-            filtrados = (await asyncio.to_thread(torre.ordenar_por_power, filtrados, self.guild_id, self.autor_id))[:25]
+            filtrados = (await asyncio.to_thread(
+                torre.ordenar_por_power, filtrados, self.guild_id, self.autor_id, contexto_lote,
+            ))[:25]
             if not filtrados:
                 await interaction_filtro.followup.send(
                     f"Você não tem nenhuma personagem fora da Party na role {categoria}.", ephemeral=True,
                 )
                 return
-            contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, self.autor_id)
             view = _ViewSelecionarPersonagem(
                 filtrados, f"Escolha até {min(vagas, len(filtrados))} personagem(ns)...", self._adicionar_selecionados,
                 min_values=1, max_values=min(vagas, len(filtrados)),
@@ -2785,19 +3732,30 @@ class ViewLoja(discord.ui.View):
         # 🔥 Progressão Global da conta (2026-08-30, análise do usuário
         # Seção 7: "a loja também será uma das principais formas de
         # transformar WiShards em crescimento permanente") - SEM nível
-        # máximo, diferente dos 2 upgrades acima.
+        # máximo, mesmo espírito dos 2 upgrades acima (que perderam o teto
+        # em 2026-09-03).
         treinamento = discord.ui.Button(label="Treinamento Global", emoji="🏋️", style=discord.ButtonStyle.success, row=1)
         treinamento.callback = self._treinamento_global
         self.add_item(treinamento)
         potencial = discord.ui.Button(label="Potencial da Coleção", emoji="📊", style=discord.ButtonStyle.success, row=1)
         potencial.callback = self._potencial_colecao
         self.add_item(potencial)
-        itens_botao = discord.ui.Button(label="Itens", emoji="🎁", style=discord.ButtonStyle.primary, row=2)
-        itens_botao.callback = self._abrir_itens
-        self.add_item(itens_botao)
-        slot_serie_botao = discord.ui.Button(label="Slot de Série Favorita", emoji="❤️", style=discord.ButtonStyle.success, row=2)
-        slot_serie_botao.callback = self._upgrade_slot_serie_favorita
-        self.add_item(slot_serie_botao)
+        # 🔥 "Slot de Série Favorita" removido daqui (2026-09-06, pedido do
+        # usuário: "Pode remover a opção de Slot de Serie Favorita na
+        # loja") - duplicava o próprio botão "Comprar slot" já existente
+        # dentro da tela "❤️ Séries Favoritas" (`_ViewSeriesFavoritas.
+        # _comprar_slot`, mesmo preço/tabela), sem nenhuma vantagem extra;
+        # o slot de Waifu nunca teve essa duplicata na Loja pra começar.
+        # 🔥 Itens direto como botão, sem o "Itens" -> dropdown intermediário
+        # (2026-09-03, pedido do usuário: "como temos poucos itens, pode
+        # tirar eles de dentro do dropdown e por como botão direto na
+        # loja") - `ITENS_LOJA` já exclui Roll/Claim Permanente (removidos
+        # da Loja no mesmo pedido, ver `itens.ITENS_LOJA`), sobrando 5
+        # itens - cabem numa linha só.
+        for chave, dados in itens.ITENS_LOJA.items():
+            botao_item = discord.ui.Button(label=dados["nome"][:80], style=discord.ButtonStyle.primary, row=2)
+            botao_item.callback = self._comprar_item_loja(chave)
+            self.add_item(botao_item)
 
     async def _somente_autor(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.autor_id:
@@ -2817,80 +3775,85 @@ class ViewLoja(discord.ui.View):
         view = _ViewEscolherRaridadeLoja(self, acao="garantir")
         await interaction.response.send_message("Escolha a raridade mínima garantida:", view=view, ephemeral=True)
 
-    async def _abrir_itens(self, interaction: discord.Interaction):
-        """Seção 14 (2026-09-01) - mesmos itens raros do World Boss,
-        comprados com WiShards."""
-        if not await self._somente_autor(interaction):
-            return
-        view = _ViewLojaItens(self.guild_id)
-        await interaction.response.send_message("🎁 Escolha o item:", view=view, ephemeral=True)
+    def _comprar_item_loja(self, chave):
+        """Fábrica de callback por item (2026-09-03) - factory function em
+        vez de closure direta dentro do `for` do `__init__` (armadilha
+        clássica de late-binding: todos os botões acabariam apontando pro
+        ÚLTIMO `chave` do loop sem isso). Dropdown de quantidade (1-25)
+        já mostrando o preço TOTAL de cada opção + saldo atual, mesmo
+        padrão de "Treinamento Global"/"Potencial da Coleção" (pedido do
+        usuário: "permita comprar vários por vez... igual como funciona no
+        potencial da coleção") - preço sobe por unidade já comprada
+        (`itens.custo_total_item`, `itens.FATOR_CRESCIMENTO_PRECO_LOJA`)."""
+        dados = itens.CATALOGO_ITENS[chave]
+
+        async def _callback(interaction: discord.Interaction):
+            if not await self._somente_autor(interaction):
+                return
+            saldo = db.saldo_wishards(self.guild_id, interaction.user.id)
+
+            async def _confirmar(interacao_confirmacao, quantidade):
+                ok, mensagem = itens.comprar_item(self.guild_id, interacao_confirmacao.user.id, chave, quantidade)
+                await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
+
+            async def _cancelar(interacao_cancelamento):
+                await interacao_cancelamento.response.edit_message(content="Cancelado.", view=None)
+
+            view = _ViewEscolherAlvo(
+                "Quantidade", 0, _TETO_OPCOES_DROPDOWN_LOJA,
+                lambda quantidade: itens.custo_total_item(self.guild_id, interaction.user.id, chave, quantidade),
+                "WiShards", _confirmar, _cancelar, saldo_atual=saldo,
+            )
+            await interaction.response.send_message(
+                f"{dados['nome']} - {dados['descricao']}\nEscolha a quantidade:", view=view, ephemeral=True,
+            )
+        return _callback
 
     async def _upgrade(self, interaction: discord.Interaction):
+        """Sem nível máximo (2026-09-03, pedido do usuário: "vamos remover
+        limite de compra de upgrade de rolls e claims") - mesmo dropdown de
+        "Treinamento Global"/"Potencial da Coleção", pula vários níveis de
+        uma vez, já mostrando custo total + saldo."""
         if not await self._somente_autor(interaction):
             return
         nivel_atual = db.nivel_upgrade_rolls(self.guild_id, interaction.user.id)
-        if nivel_atual >= db.NIVEL_MAXIMO_UPGRADE_ROLLS:
-            await interaction.response.send_message("Você já está no nível máximo desse upgrade.", ephemeral=True)
-            return
-        preco = db.PRECOS_UPGRADE_ROLLS[nivel_atual + 1]
+        saldo = db.saldo_wishards(self.guild_id, interaction.user.id)
 
-        async def _confirmar(interacao_confirmacao: discord.Interaction):
-            ok, mensagem = db.comprar_upgrade_rolls(self.guild_id, interacao_confirmacao.user.id)
+        async def _confirmar(interacao_confirmacao, alvo):
+            ok, mensagem = db.comprar_upgrade_rolls_ate(self.guild_id, interacao_confirmacao.user.id, alvo)
             await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
 
-        view = _ViewConfirmar(_confirmar)
-        bonus = (nivel_atual + 1) * db.BONUS_ROLLS_POR_NIVEL
-        await interaction.response.send_message(
-            f"Nível {nivel_atual + 1}: +{db.BONUS_ROLLS_POR_NIVEL} rolls por ciclo, PRA SEMPRE "
-            f"(acumulado: +{bonus} no total) - custa {preco} WiShards. Confirma?",
-            view=view, ephemeral=True,
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(content="Cancelado.", view=None)
+
+        view = _ViewEscolherAlvo(
+            "Upgrade de rolls", nivel_atual, nivel_atual + _TETO_OPCOES_DROPDOWN_LOJA,
+            lambda alvo: db.custo_total_upgrade_rolls_ate(nivel_atual, alvo),
+            "WiShards", _confirmar, _cancelar, saldo_atual=saldo,
         )
+        await interaction.response.send_message("Escolha até qual nível de Upgrade de rolls ir:", view=view, ephemeral=True)
 
     async def _upgrade_claims(self, interaction: discord.Interaction):
-        """Espelha `_upgrade` (rolls), 2026-08-29 - pedido do usuário
-        "claim tem q ter upgrade permanente tbm"."""
+        """Espelha `_upgrade` (rolls), mesmo pedido do usuário de remover o
+        teto de nível (2026-09-03)."""
         if not await self._somente_autor(interaction):
             return
         nivel_atual = db.nivel_upgrade_claims(self.guild_id, interaction.user.id)
-        if nivel_atual >= db.NIVEL_MAXIMO_UPGRADE_CLAIMS:
-            await interaction.response.send_message("Você já está no nível máximo desse upgrade.", ephemeral=True)
-            return
-        preco = db.PRECOS_UPGRADE_CLAIMS[nivel_atual + 1]
+        saldo = db.saldo_wishards(self.guild_id, interaction.user.id)
 
-        async def _confirmar(interacao_confirmacao: discord.Interaction):
-            ok, mensagem = db.comprar_upgrade_claims(self.guild_id, interacao_confirmacao.user.id)
+        async def _confirmar(interacao_confirmacao, alvo):
+            ok, mensagem = db.comprar_upgrade_claims_ate(self.guild_id, interacao_confirmacao.user.id, alvo)
             await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
 
-        view = _ViewConfirmar(_confirmar)
-        bonus = (nivel_atual + 1) * db.BONUS_CLAIMS_POR_NIVEL
-        await interaction.response.send_message(
-            f"Nível {nivel_atual + 1}: +{db.BONUS_CLAIMS_POR_NIVEL} claim(s) por ciclo, PRA SEMPRE "
-            f"(acumulado: +{bonus} no total) - custa {preco} WiShards. Confirma?",
-            view=view, ephemeral=True,
+        async def _cancelar(interacao_cancelamento):
+            await interacao_cancelamento.response.edit_message(content="Cancelado.", view=None)
+
+        view = _ViewEscolherAlvo(
+            "Upgrade de claims", nivel_atual, nivel_atual + _TETO_OPCOES_DROPDOWN_LOJA,
+            lambda alvo: db.custo_total_upgrade_claims_ate(nivel_atual, alvo),
+            "WiShards", _confirmar, _cancelar, saldo_atual=saldo,
         )
-
-    async def _upgrade_slot_serie_favorita(self, interaction: discord.Interaction):
-        """Espelha `_upgrade`/`_upgrade_claims` - slot extra de Série
-        Favorita (2026-09-02, `pandora.series_favoritas`), 5 base + até 5
-        pagos aqui."""
-        if not await self._somente_autor(interaction):
-            return
-        nivel_atual = db.nivel_upgrade_slots_serie_favorita(self.guild_id, interaction.user.id)
-        if nivel_atual >= db.NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_FAVORITA:
-            await interaction.response.send_message("Você já tem o número máximo de slots de Série Favorita.", ephemeral=True)
-            return
-        preco = db.PRECOS_UPGRADE_SLOT_SERIE_FAVORITA[nivel_atual + 1]
-
-        async def _confirmar(interacao_confirmacao: discord.Interaction):
-            ok, mensagem = db.comprar_slot_serie_favorita(self.guild_id, interacao_confirmacao.user.id)
-            await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
-
-        view = _ViewConfirmar(_confirmar)
-        total_slots = db.SLOTS_BASE_SERIE_FAVORITA + nivel_atual + 1
-        await interaction.response.send_message(
-            f"Slot {total_slots}: +1 Série Favorita, PRA SEMPRE - custa {preco} WiShards. Confirma?",
-            view=view, ephemeral=True,
-        )
+        await interaction.response.send_message("Escolha até qual nível de Upgrade de claims ir:", view=view, ephemeral=True)
 
     async def _treinamento_global(self, interaction: discord.Interaction):
         """Progressão Global (2026-08-30) - +CP FIXO por personagem, SEM
@@ -2976,16 +3939,16 @@ class _ViewEscolherRaridadeLoja(discord.ui.View):
 
         async def _confirmar(interacao_confirmacao: discord.Interaction):
             if db.saldo_wishards(self._view_loja.guild_id, interacao_confirmacao.user.id) < preco:
-                await interacao_confirmacao.response.edit_message(content=f"Custa {preco} WiShards e você não tem o suficiente.", view=None)
+                await interacao_confirmacao.response.edit_message(content=f"Custa {_fmt_numero(preco)} WiShards e você não tem o suficiente.", view=None)
                 return
             db.creditar_wishards(self._view_loja.guild_id, interacao_confirmacao.user.id, -preco, "loja_garantia", f"garantia {raridade}estrelas")
             db.definir_garantia(self._view_loja.guild_id, interacao_confirmacao.user.id, raridade)
             await interacao_confirmacao.response.edit_message(
-                content=f"Garantido: seu próximo roll vai ser {raridade}⭐ ou mais (custou {preco} WiShards).", view=None,
+                content=f"Garantido: seu próximo roll vai ser {raridade}⭐ ou mais (custou {_fmt_numero(preco)} WiShards).", view=None,
             )
 
         view = _ViewConfirmar(_confirmar)
-        await interaction.response.edit_message(content=f"Garantir {raridade}⭐ custa {preco} WiShards - confirma?", view=view)
+        await interaction.response.edit_message(content=f"Garantir {raridade}⭐ custa {_fmt_numero(preco)} WiShards - confirma?", view=view)
 
 
 class _ModalBuscarNomeLoja(discord.ui.Modal, title="Comprar personagem"):
@@ -3042,12 +4005,14 @@ class _ViewComprarPersonagem(discord.ui.View):
         super().__init__(timeout=120)
         self._view_loja = view_loja
         self._personagens = personagens
+
+        def _opcao(indice, p):
+            texto, emoji = _descricao_personagem_livre_dropdown(p)
+            return discord.SelectOption(label=p["nome"][:100], description=texto, value=str(indice), emoji=emoji)
+
         select = discord.ui.Select(
-            placeholder=f"Comprar por {db.PRECOS_LOJA[raridade]} WiShards...",
-            options=[
-                discord.SelectOption(label=p["nome"][:100], description=f"#{p['id']}", value=str(indice))
-                for indice, p in enumerate(personagens)
-            ],
+            placeholder=f"Comprar por {_fmt_numero(db.PRECOS_LOJA[raridade])} WiShards...",
+            options=[_opcao(indice, p) for indice, p in enumerate(personagens)],
         )
         select.callback = self._comprar
         self.add_item(select)
@@ -3060,13 +4025,51 @@ class _ViewComprarPersonagem(discord.ui.View):
         # em nenhum servidor - mesma classe de bug de timeout já corrigida
         # várias vezes nesta sessão (defer sempre a 1ª linha).
         await interaction.response.defer()
-        ok, mensagem = await gacha.comprar_com_revelacao(self._view_loja.guild_id, personagem["id"], interaction.user)
+        ok, mensagem, tem_classe = await gacha.comprar_com_revelacao(self._view_loja.guild_id, personagem["id"], interaction.user)
+        if ok:
+            mensagem += _sufixo_aviso_sem_classe(tem_classe)
         await interaction.edit_original_response(content=mensagem, view=None)
 
 
+# 🔥 Sufixos aceitos de VOLTA na digitação (2026-09-04, pedido do usuário:
+# "tem como colocar mascara de pontuação dentro das janelas q pedem
+# numeros?") - Discord não dá nenhum jeito de mascarar a digitação num
+# `discord.ui.TextInput` (é texto puro, sem controle nenhum do bot sobre
+# como o cliente formata em tempo real) - a saída foi `_int_seguro`
+# aceitar de volta os MESMOS formatos que `db.fmt_numero` já mostra na
+# tela, em vez de exigir dígito puro.
+_SUFIXOS_ENTRADA_NUMERO = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000, "T": 1_000_000_000_000, "Q": 1_000_000_000_000_000}
+
+
 def _int_seguro(texto):
-    texto = (texto or "").strip()
-    return int(texto) if texto.lstrip("-").isdigit() else 0
+    """Aceita dígito puro de sempre ("1000000"), separador de milhar -
+    ponto OU vírgula, tanto faz ("1.000.000"/"1,000,000") - e sufixo
+    abreviado igual `db.fmt_numero` mostra ("75,1M"/"75.1M", igual o
+    "você tem 75,1M WiShards" que já aparece no label do campo). Sufixos
+    de 2 letras (AA/AB/...) não são aceitos aqui - pra esses casos raros,
+    digitar o número completo continua funcionando. Texto vazio/inválido
+    sempre cai em 0, nunca lança erro."""
+    texto = (texto or "").strip().upper()
+    if not texto:
+        return 0
+    sufixo = texto[-1] if texto[-1] in _SUFIXOS_ENTRADA_NUMERO else None
+    corpo = texto[:-1] if sufixo else texto
+    if sufixo:
+        try:
+            return int(round(float(corpo.replace(",", ".")) * _SUFIXOS_ENTRADA_NUMERO[sufixo]))
+        except ValueError:
+            return 0
+    # 🔥 Sem sufixo, "." e "," só valem como separador de MILHAR (grupos
+    # de exatamente 3 dígitos depois do primeiro) - nunca como ponto
+    # decimal ("1.5" tem que falhar, não virar "15" silenciosamente).
+    negativo = corpo.startswith("-")
+    grupos = re.split(r"[.,]", corpo[1:] if negativo else corpo)
+    if len(grupos) > 1 and any(not g.isdigit() or len(g) != 3 for g in grupos[1:]):
+        return 0
+    corpo = "".join(grupos)
+    if not corpo.isdigit():
+        return 0
+    return -int(corpo) if negativo else int(corpo)
 
 
 class _ViewEscolherAlvoTroca(discord.ui.View):
@@ -3096,7 +4099,14 @@ class _ViewEscolherAlvoTroca(discord.ui.View):
                 db.colecao_do_usuario(self.guild_id, interaction.user.id), self.guild_id, interaction.user.id,
             )
         colecao_proponente = (await asyncio.to_thread(_buscar_ordenada))[:25]
-        view = _ViewEscolherPersonagensTroca(self.guild_id, interaction.user.id, alvo, colecao_proponente, etapa="oferece")
+        # 🔥 mesmo formato de dropdown do Party/Merge (2026-09-06, pedido do
+        # usuário: "A lista dos personagens de troca... esta errado" - o
+        # select de Trocas mostrava só nome+estrelas, nunca classe/CP/nível/
+        # afinidade, diferente de todo outro select de personagem do pacote).
+        contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, interaction.user.id)
+        view = _ViewEscolherPersonagensTroca(
+            self.guild_id, interaction.user.id, alvo, colecao_proponente, etapa="oferece", contexto_lote=contexto_lote,
+        )
         await interaction.response.edit_message(content=f"Trocando com {alvo.mention} - escolha o que você OFERECE:", view=view)
 
 
@@ -3112,7 +4122,7 @@ class _ViewEscolherPersonagensTroca(discord.ui.View):
     WiShards sem nenhuma personagem é uma oferta válida (mesmo espírito de
     `/trocar propor` sem os parâmetros de personagem)."""
 
-    def __init__(self, guild_id, proponente_id, alvo, colecao, etapa, oferece_ids=None):
+    def __init__(self, guild_id, proponente_id, alvo, colecao, etapa, oferece_ids=None, contexto_lote=None):
         super().__init__(timeout=180)
         self.guild_id = guild_id
         self.proponente_id = str(proponente_id)
@@ -3121,15 +4131,24 @@ class _ViewEscolherPersonagensTroca(discord.ui.View):
         self._colecao = colecao
         self._oferece_ids = oferece_ids or []
         rotulo = "OFERECE" if etapa == "oferece" else "PEDE"
+        # 🔥 mesmo formato de dropdown do Party/Merge/"🔍 Personagem"
+        # (2026-09-06, pedido do usuário: "A lista dos personagens de
+        # troca... esta errado") - `dono_id` é quem POSSUI a coleção sendo
+        # mostrada (proponente na etapa "oferece", alvo na "pede"), não
+        # sempre o proponente.
+        dono_id = self.proponente_id if etapa == "oferece" else str(alvo.id)
+
+        def _opcao(indice, p):
+            texto, emoji = _descricao_personagem_dropdown(p, guild_id, dono_id, contexto_lote)
+            return discord.SelectOption(label=p["nome"][:100], description=texto[:100], value=str(indice), emoji=emoji)
+
         select = discord.ui.Select(
             placeholder=f"Personagens que você {rotulo} (opcional)...",
             min_values=0,
             max_values=min(25, len(colecao)) if colecao else 1,
             disabled=not colecao,
-            options=[
-                discord.SelectOption(label=p["nome"][:100], description=gacha.estrelas_por_raridade(p["raridade"]), value=str(indice))
-                for indice, p in enumerate(colecao)
-            ] or [discord.SelectOption(label="(nenhuma personagem disponível)", value="-1")],
+            options=[_opcao(indice, p) for indice, p in enumerate(colecao)]
+            or [discord.SelectOption(label="(nenhuma personagem disponível)", value="-1")],
         )
         select.callback = self._selecionou
         self.add_item(select)
@@ -3144,8 +4163,10 @@ class _ViewEscolherPersonagensTroca(discord.ui.View):
             def _buscar_ordenada():
                 return torre.ordenar_por_power(db.colecao_do_usuario(self.guild_id, self.alvo.id), self.guild_id, self.alvo.id)
             colecao_alvo = (await asyncio.to_thread(_buscar_ordenada))[:25]
+            contexto_lote_alvo = await asyncio.to_thread(torre._contexto_lote, self.guild_id, self.alvo.id)
             proxima = _ViewEscolherPersonagensTroca(
                 self.guild_id, self.proponente_id, self.alvo, colecao_alvo, etapa="pede", oferece_ids=ids_escolhidos,
+                contexto_lote=contexto_lote_alvo,
             )
             await interaction.response.edit_message(content=f"Trocando com {self.alvo.mention} - agora escolha o que você PEDE:", view=proxima)
             return
@@ -3182,17 +4203,17 @@ def _texto_valores_troca(guild_id, proponente_id, alvo, oferece_ids, pede_ids):
     valor_pede = economia.valor_loja_personagens(pede_ids)
     saldo = db.saldo_wishards(guild_id, proponente_id)
     linhas = [
-        f"💰 Seu saldo atual: {saldo} WiShards",
-        f"🏪 Valor de loja do que você OFERECE: {valor_oferece} WiShards",
-        f"🏪 Valor de loja do que você PEDE: {valor_pede} WiShards",
+        f"💰 Seu saldo atual: {_fmt_numero(saldo)} WiShards",
+        f"🏪 Valor de loja do que você OFERECE: {_fmt_numero(valor_oferece)} WiShards",
+        f"🏪 Valor de loja do que você PEDE: {_fmt_numero(valor_pede)} WiShards",
     ]
     if alvo.bot:
         limiar = valor_pede * economia.LIMIAR_TROCA_NPC
         faltam = max(0, limiar - valor_oferece)
         linhas.append(
             f"🤖 {alvo.mention} é uma conta de bot - só aceita se o total oferecido (WiShards + valor de "
-            f"loja dos personagens) for pelo menos **{limiar}** WiShards (10x o valor de loja do que você "
-            f"pede). Contando só os personagens já escolhidos, faltam pelo menos **{faltam}** WiShards."
+            f"loja dos personagens) for pelo menos **{_fmt_numero(limiar)}** WiShards (10x o valor de loja do que você "
+            f"pede). Contando só os personagens já escolhidos, faltam pelo menos **{_fmt_numero(faltam)}** WiShards."
         )
     return "\n".join(linhas)
 
@@ -3275,13 +4296,13 @@ def _embed_batalha(desafio, autor_id):
         if papel == "desafiante":
             embed.description = (
                 f"⏳ Aguardando resposta pela sua reivindicação de **{personagem['nome']}** "
-                f"({desafio['aposta_wishards']} WiShards em risco)."
+                f"({_fmt_numero(desafio['aposta_wishards'])} WiShards em risco)."
             )
         else:
             comp = batalha.composicao_ordem(json.loads(desafio["ordem_desafiante"]))
             embed.description = (
                 f"⚔️ Sua **{personagem['nome']}** está sendo desafiada - "
-                f"{desafio['aposta_wishards']} WiShards em risco pro desafiante se você vencer.\n"
+                f"{_fmt_numero(desafio['aposta_wishards'])} WiShards em risco pro desafiante se você vencer.\n"
                 f"Composição adversária: ⚔️ DPS {comp['DPS']} · 🛡️ Tank {comp['Tank']} · ✨ Support {comp['Support']} "
                 f"(ordem oculta)."
             )
@@ -3297,12 +4318,12 @@ def _embed_resultado_final(desafio, personagem, nome_desafiante, nome_defensor, 
     if vencedor == "desafiante":
         descricao = (
             f"🏆 **{nome_desafiante} venceu!** **{personagem['nome']}** foi transferida - "
-            f"{nome_defensor} NÃO recebeu os {desafio['aposta_wishards']} WiShards apostados (a aposta some da economia)."
+            f"{nome_defensor} NÃO recebeu os {_fmt_numero(desafio['aposta_wishards'])} WiShards apostados (a aposta some da economia)."
         )
     else:
         descricao = (
             f"🏆 **{nome_defensor} defendeu {personagem['nome']}!** "
-            f"+{desafio['aposta_wishards']} WiShards do desafiante."
+            f"+{_fmt_numero(desafio['aposta_wishards'])} WiShards do desafiante."
         )
     embed = discord.Embed(title=f"⚔️ Resultado - {personagem['nome']}", description=descricao, color=_COR_HUB)
     embed.add_field(name="Placar final", value=f"{nome_desafiante} {placar_a} x {placar_b} {nome_defensor}", inline=False)
@@ -3386,7 +4407,7 @@ async def _anunciar_desafio(canal, guild_id, desafio_id, alvo_mention):
     texto = (
         f"⚔️ **Desafio recebido, {alvo_mention}!**\n"
         f"Sua **{personagem['nome']}** ({gacha.estrelas_por_raridade(personagem['raridade'])}) está sendo reivindicada.\n"
-        f"Aposta em risco pro desafiante: **{desafio['aposta_wishards']} WiShards**.\n"
+        f"Aposta em risco pro desafiante: **{_fmt_numero(desafio['aposta_wishards'])} WiShards**.\n"
         f"Composição do desafiante: ⚔️ DPS {comp['DPS']} · 🛡️ Tank {comp['Tank']} · ✨ Support {comp['Support']} (ordem oculta).\n"
         f"Abra `/pandora` -> ⚔️ PvP pra montar sua defesa ou recusar."
     )
@@ -3405,7 +4426,7 @@ class SchedulerBatalha:
     `LIMITE_MINUTOS_AUTO_DEFESA` - substitui o cancelamento por
     inatividade de 24h antigo (`batalha.cancelar_expirados`, removido - o
     auto-resolve de 10min sempre vence a corrida antes dele acontecer).
-    Roda só na instância "completo" (mesmo critério de `SchedulerWorldBoss`
+    Roda só na instância "principal" (mesmo critério de `SchedulerWorldBoss`
     - é onde vive o hub "⚔️ PvP"), instanciado em `eris/bot.py`."""
 
     LIMITE_MINUTOS_AUTO_DEFESA = 10
@@ -3660,9 +4681,14 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
             await interaction.response.send_message(f"{alvo.display_name} ainda não tem nenhuma personagem.", ephemeral=True)
             return
         self._alvo = alvo
+        # 🔥 mesmo formato de dropdown do Party/Merge (2026-09-06, pedido do
+        # usuário: "os de personagem tem q ser igual do party") - CP/Nível/
+        # Afinidade são do ALVO (`alvo.id`), não de quem está desafiando.
+        contexto_lote_alvo = await asyncio.to_thread(torre._contexto_lote, self.guild_id, alvo.id)
         modal = _ModalBuscarPersonagem(
             f"Desafiar {alvo.display_name} por quem?", colecao_alvo,
             "Escolha a personagem que você quer conquistar...", self._personagem_escolhida,
+            descricao=lambda p: _descricao_personagem_dropdown(p, self.guild_id, alvo.id, contexto_lote_alvo),
         )
         await interaction.response.send_modal(modal)
 
@@ -3733,7 +4759,7 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
                         return
                     await interacao_confirmacao.edit_original_response(
                         content=(
-                            f"⚔️ Desafio enviado! {aposta} WiShards em risco - aguardando {alvo.mention} responder "
+                            f"⚔️ Desafio enviado! {_fmt_numero(aposta)} WiShards em risco - aguardando {alvo.mention} responder "
                             f"(acompanhe em `/pandora` -> ⚔️ PvP)."
                         ),
                         view=None,
@@ -3755,7 +4781,7 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
             await interacao_formacao.response.edit_message(
                 content=(
                     f"Desafiar {alvo.mention} por **{personagem['nome']}** ({gacha.estrelas_por_raridade(personagem['raridade'])}) - "
-                    f"você arrisca **{aposta} WiShards**, mas só paga de verdade se PERDER (vencer não custa nada, esses "
+                    f"você arrisca **{_fmt_numero(aposta)} WiShards**, mas só paga de verdade se PERDER (vencer não custa nada, esses "
                     f"WiShards não são debitados agora). Confirma?"
                 ),
                 view=view_confirmar,
@@ -3901,40 +4927,6 @@ class ViewWorldBossHub(discord.ui.View):
 # regra de negócio em `pandora.itens`/`pandora.conquistas`, aqui só a UI.
 # ==========================================================================
 
-class _ViewLojaItens(discord.ui.View):
-    """Loja de itens raros (Seção 14) - mesmo catálogo do drop do World
-    Boss, comprado com WiShards."""
-
-    def __init__(self, guild_id):
-        super().__init__(timeout=120)
-        self.guild_id = guild_id
-        select = discord.ui.Select(
-            placeholder="Escolha o item...",
-            options=[
-                discord.SelectOption(
-                    label=f"{dados['nome']} - {itens.PRECOS_LOJA_ITENS[chave]} WiShards", value=chave,
-                    description=dados["descricao"][:100],
-                )
-                for chave, dados in itens.CATALOGO_ITENS.items()
-            ],
-        )
-        select.callback = self._selecionou
-        self.add_item(select)
-
-    async def _selecionou(self, interaction: discord.Interaction):
-        item = interaction.data["values"][0]
-        dados = itens.CATALOGO_ITENS[item]
-        preco = itens.PRECOS_LOJA_ITENS[item]
-
-        async def _confirmar(interacao_confirmacao: discord.Interaction):
-            ok, mensagem = itens.comprar_item(self.guild_id, interacao_confirmacao.user.id, item, 1)
-            await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
-
-        view = _ViewConfirmar(_confirmar)
-        await interaction.response.edit_message(
-            content=f"{dados['nome']} - {dados['descricao']}\nCusta **{preco} WiShards**. Confirma?", view=view,
-        )
-
 
 class ViewInventarioHub(discord.ui.View):
     """Painel "🎒 Inventário" - painel PESSOAL (restrito ao autor, ao
@@ -4000,7 +4992,14 @@ class ViewInventarioHub(discord.ui.View):
             embed.add_field(name="🛡️ Personagens protegidas", value=", ".join(nomes), inline=False)
         niveis = db.niveis_construcoes(self.guild_id, self.autor_id)
         if niveis:
-            linhas_construcao = [f"{itens.AREAS_CONSTRUCAO[area]} ({area}): Nível {nivel}" for area, nivel in niveis.items()]
+            # 🔥 "/teto" (2026-09-03) - área/construção deixaram de ser 2
+            # coisas (`itens.AREAS_CONSTRUCAO` era um dict área->nome de
+            # construção, "Militar"->"Quartel"; pedido do usuário: "vc tem
+            # distinguindo construção de area, mas é a msm coisa, so use
+            # area") - só a área agora, com o teto DINÂMICO vigente ao lado
+            # (`db.teto_atual_construcao`, ver comentário lá).
+            teto = db.teto_atual_construcao(self.guild_id, self.autor_id)
+            linhas_construcao = [f"{area}: Nível {nivel}/{teto}" for area, nivel in niveis.items()]
             embed.add_field(name="🏗️ Construções", value="\n".join(linhas_construcao), inline=False)
         return embed
 
@@ -4013,12 +5012,18 @@ class ViewInventarioHub(discord.ui.View):
         if not colecao:
             await interaction.response.send_message("Você não tem nenhuma personagem.", ephemeral=True)
             return
+        # 🔥 mesmo formato de dropdown do Party/Merge (2026-09-06, pedido do
+        # usuário: "os de personagem tem q ser igual do party").
+        contexto_lote = await asyncio.to_thread(torre._contexto_lote, self.guild_id, interaction.user.id)
 
         async def _ao_selecionar(interacao_sel, personagens, _candidatos):
             ok, mensagem = itens.usar_protecao(self.guild_id, interacao_sel.user.id, personagens[0]["id"])
             await interacao_sel.response.edit_message(content=mensagem, view=None)
 
-        modal = _ModalBuscarPersonagem("Proteger qual personagem?", colecao, "Escolha a personagem...", _ao_selecionar)
+        modal = _ModalBuscarPersonagem(
+            "Proteger qual personagem?", colecao, "Escolha a personagem...", _ao_selecionar,
+            descricao=lambda p: _descricao_personagem_dropdown(p, self.guild_id, interaction.user.id, contexto_lote),
+        )
         await interaction.response.send_modal(modal)
 
     async def _usar_revanche(self, interaction: discord.Interaction):
@@ -4073,7 +5078,15 @@ class ViewInventarioHub(discord.ui.View):
                 content="Escolha a categoria de cada uma das 5 posições da sua formação:", view=view_formacao,
             )
 
-        view = _ViewSelecionarPersonagem(perdidas, "Escolha quem recuperar...", _ao_selecionar)
+        # 🔥 Descrição "livre" (2026-09-06, pedido do usuário: "os de
+        # personagem tem q ser igual do party") - cada perdida tem um DONO
+        # ATUAL diferente (quem venceu a Batalha), não dá pra usar 1 só
+        # `contexto_lote` (é por conta); mostra classe/CP base, que não
+        # dependem de dono nenhum.
+        view = _ViewSelecionarPersonagem(
+            perdidas, "Escolha quem recuperar...", _ao_selecionar,
+            descricao=lambda p: _descricao_personagem_livre_dropdown(p),
+        )
         await interaction.response.send_message("Selecione:", view=view, ephemeral=True)
 
     async def _usar_chave(self, interaction: discord.Interaction):
@@ -4082,14 +5095,52 @@ class ViewInventarioHub(discord.ui.View):
         await interaction.response.edit_message(content=mensagem, embed=self.formatar(), view=self)
 
     async def _usar_construcao(self, interaction: discord.Interaction):
+        """Escolhe a ÁREA primeiro, depois ATÉ QUAL NÍVEL subir - em LOTE
+        (2026-09-03, pedido do usuário: "alguns pode permitir usar varios
+        por vez, como o upgrade de construção, q upo a msm construção
+        varios lv por vez") - reaproveita o MESMO dropdown "até qual alvo"
+        que Treinamento Global/Potencial da Coleção/Upgrade de Rolls/
+        Claims já usam (`_ViewEscolherAlvo`), só que a "unidade" aqui é
+        Upgrade(s) de Construção (1 por nível) em vez de WiShards. Teto
+        por área é DINÂMICO (`db.teto_atual_construcao`), mostrado já na
+        1ª escolha (nível atual/teto de cada área) pro jogador ver quem
+        está mais atrasado."""
+        teto = db.teto_atual_construcao(self.guild_id, self.autor_id)
+        niveis = db.niveis_construcoes(self.guild_id, self.autor_id)
         select = discord.ui.Select(
             placeholder="Escolha a área...",
-            options=[discord.SelectOption(label=f"{nome} ({area})", value=area) for area, nome in itens.AREAS_CONSTRUCAO.items()],
+            options=[
+                discord.SelectOption(label=f"{area} (Nível {niveis.get(area, 0)}/{teto})", value=area)
+                for area in itens.AREAS_CONSTRUCAO
+            ],
         )
 
         async def _callback(interacao_sel: discord.Interaction):
-            ok, mensagem = itens.usar_upgrade_construcao(self.guild_id, interacao_sel.user.id, interacao_sel.data["values"][0])
-            await interacao_sel.response.edit_message(content=mensagem, view=None)
+            area = interacao_sel.data["values"][0]
+            nivel_atual = db.nivel_construcao(self.guild_id, interacao_sel.user.id, area)
+            teto_atual = db.teto_atual_construcao(self.guild_id, interacao_sel.user.id)
+            if nivel_atual >= teto_atual:
+                await interacao_sel.response.edit_message(
+                    content=f"{area} já está no teto atual (Nível {teto_atual}) - suba as outras áreas até lá pro teto aumentar.",
+                    view=None,
+                )
+                return
+            disponivel = db.quantidade_item(self.guild_id, interacao_sel.user.id, "upgrade_construcao")
+
+            async def _confirmar(interacao_confirmacao, alvo):
+                ok, mensagem = itens.usar_upgrade_construcao(
+                    self.guild_id, interacao_confirmacao.user.id, area, alvo - nivel_atual,
+                )
+                await interacao_confirmacao.response.edit_message(content=mensagem, view=None)
+
+            async def _cancelar(interacao_cancelamento):
+                await interacao_cancelamento.response.edit_message(content="Cancelado.", view=None)
+
+            view_alvo = _ViewEscolherAlvo(
+                area, nivel_atual, teto_atual, lambda alvo: alvo - nivel_atual,
+                "Upgrade(s) de Construção", _confirmar, _cancelar, saldo_atual=disponivel,
+            )
+            await interacao_sel.response.edit_message(content=f"Escolha até qual Nível subir {area}:", view=view_alvo)
 
         select.callback = _callback
         view_select = discord.ui.View(timeout=60)
@@ -4185,11 +5236,11 @@ class ViewBonusClasseHub(discord.ui.View):
             dados = categorias[categoria]
             icone = torre.icone_categoria(categoria) if categoria != "Sem categoria" else "❓"
             linhas = [
-                f"{c['classe']}: +{c['bonus']} CP ({c['quantidade']}/{c['proximo_marco']} p/ próximo marco)"
+                f"{c['classe']}: +{_fmt_numero(c['bonus'])} CP ({c['quantidade']}/{c['proximo_marco']} p/ próximo marco)"
                 for c in dados["classes"]
             ]
             embed.add_field(
-                name=f"{icone} {categoria} - +{dados['total_bonus']} CP no total ({dados['total_personagens']} personagens)",
+                name=f"{icone} {categoria} - +{_fmt_numero(dados['total_bonus'])} CP no total ({dados['total_personagens']} personagens)",
                 value="\n".join(linhas)[:1024],
                 inline=False,
             )
@@ -4230,7 +5281,7 @@ class _ModalInvestirEmMassa(discord.ui.Modal):
         moeda = "WiShards" if tipo == "nivel" else "Soulstone"
         self.valor = discord.ui.TextInput(
             label=f"Quanto? (você tem {_fmt_numero(saldo_atual)} {moeda})"[:45],
-            placeholder="Ex.: 50000",
+            placeholder="Ex.: 50000, 50.000 ou 50K",
         )
         self.add_item(self.valor)
 
@@ -4251,13 +5302,13 @@ class _ModalInvestirEmMassa(discord.ui.Modal):
             )
             moeda = "Soulstone"
         if not detalhes:
-            await interaction.followup.send(f"Nenhuma personagem pôde subir com {orcamento} {moeda} disponível.", ephemeral=True)
+            await interaction.followup.send(f"Nenhuma personagem pôde subir com {_fmt_numero(orcamento)} {moeda} disponível.", ephemeral=True)
             return
         linhas = [f"{personagem['nome']}: {antes} → {depois}" for personagem, antes, depois in detalhes[:25]]
         texto = "\n".join(linhas)
         if len(detalhes) > 25:
             texto += f"\n... e mais {len(detalhes) - 25} personagem(ns)."
-        await interaction.followup.send(f"✅ Investidos {gasto}/{orcamento} {moeda} em {len(detalhes)} personagem(ns):\n{texto}", ephemeral=True)
+        await interaction.followup.send(f"✅ Investidos {_fmt_numero(gasto)}/{_fmt_numero(orcamento)} {moeda} em {len(detalhes)} personagem(ns):\n{texto}", ephemeral=True)
 
 
 class _ViewInvestirEmMassa(discord.ui.View):

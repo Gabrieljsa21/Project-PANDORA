@@ -211,8 +211,8 @@ def iniciar_desafio(guild_id, desafiante_id, defensor_id, personagem_id, categor
     aposta = calcular_aposta(personagem)
     if db.saldo_wishards(guild_id, desafiante_id) < aposta:
         return False, (
-            f"Você precisa de {aposta} WiShards em risco pra desafiar por essa personagem "
-            f"(raridade {personagem['raridade']} × {preco_mercado(personagem)} de preço de mercado)."
+            f"Você precisa de {db.fmt_numero(aposta)} WiShards em risco pra desafiar por essa personagem "
+            f"(raridade {personagem['raridade']} × {db.fmt_numero(preco_mercado(personagem))} de preço de mercado)."
         ), None
 
     desafio_id = db.criar_desafio_batalha(guild_id, desafiante_id, defensor_id, personagem_id, aposta, ordem_desafiante, canal_id=canal_id)

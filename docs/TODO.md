@@ -1,5 +1,109 @@
 # TODO - Project PANDORA
 
+### Validar ordem da Cidade + velocidade da Party ao filtrar por role ao vivo (2026-09-06)
+
+**Prioridade:** Média | **Complexidade:** Baixa
+
+Implementado (troca de ordem em `_embed_cidade`; `_abrir_adicionar`
+reaproveitando 1 `_contexto_lote` só pro filtro/ordenação/descrição, em
+vez de 3 buscas separadas, uma delas fazendo N consultas) mas só validado
+por leitura de código, sem clique real no Discord nem medição de tempo de
+verdade. Precisa confirmar ao vivo: abrir "🏙️ Cidade" e ver "Desde sua
+última visita" mostrando WiShards/Soulstone/XP de Progressão nessa ordem;
+na Party, "➕ Adicionar" -> escolher uma role (DPS/Tank/Support) numa
+conta com MUITAS personagens (idealmente centenas, pra sentir a diferença
+de verdade) e comparar a demora percebida com antes da correção - o
+resultado final (quem aparece, em qual ordem, com qual descrição) precisa
+ser IDÊNTICO ao de antes, só mais rápido.
+
+### Validar dropdowns de personagem padronizados + 3 bugs corrigidos ao vivo (2026-09-06)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Implementado (classe + CP base em `_descricao_personagem_dropdown`/novo
+`_descricao_personagem_livre_dropdown`, Trocas corrigido pro formato
+padrão, defer() no botão Coleção do Perfil, botão de Slot de Série
+Favorita removido da Loja, card completo com imagem nas Waifus) mas só
+validado por leitura de código, sem clique real no Discord. Precisa
+confirmar ao vivo: abrir Party/Fusão/Trocas/"🔍 Personagem"/Batalha/
+Proteção/Prova de Soulmate e ver a classe + CP base aparecendo certos no
+dropdown (e sem estourar o limite de 100 caracteres de `SelectOption.
+description` em nome de classe muito longo); "Comprar Tudo"/Loja "Comprar"
+mostrando classe/CP base sem Nível/Afinidade; clicar "📚 Coleção" dentro do
+Perfil e confirmar que responde mesmo com coleção grande; conferir que a
+Loja não tem mais o botão "Slot de Série Favorita" e que comprar slot
+ainda funciona normal pela tela de Séries; abrir um slot de Waifu ocupado
+e ver a imagem/classe da personagem aparecendo no card.
+
+### `/merge` (comando de barra) provavelmente quebra ao ser usado (achado 2026-09-06)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Achado auditando o código pra escrever `FUNCIONALIDADES.md`: o comando
+`/merge` em `C:\Workspace\Project-ERIS\eris\bot.py` (linha ~1094) chama
+`economia.executar_merge(guild_id, user_id, ids, confirmar)` (4 argumentos)
+e tenta desempacotar 3 valores de retorno, mas a função real em
+`pandora/economia.py` tem assinatura `executar_merge(guild_id, user_id,
+ids, escolha_id)` e devolve só 2 valores - assinatura mudou em 2026-09-02
+(Merge virou escolha do jogador em vez de sorteio aleatório) e o comando de
+barra nunca foi atualizado junto. Precisa: (1) confirmar ao vivo que `/merge`
+de fato quebra com `TypeError`; (2) decidir se o comando é corrigido pra
+bater com a assinatura nova (a UI real da Fusão hoje é um fluxo de 2 etapas
+- escolher as 5 pra sacrificar, depois escolher o alvo entre até 25 livres
+- que não cabe bem num único comando de slash sem parâmetros; talvez o
+comando deva só abrir o mesmo painel do botão "🧬 Fusão" em vez de tentar
+replicar o fluxo por parâmetro) ou removido, já que o botão "🧬 Fusão" do
+hub `/pandora` já cobre o fluxo funcionando de verdade.
+
+### Validar navegador de Waifus + dropdown de Fortalecimento ao vivo (2026-09-06)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Implementado (`_ViewPersonagensFavoritas` virou navegador único com ◀️/▶️
+**+ dropdown "💖 Ir direto pro slot..."** (`_montar_select_slots`, add-on
+depois de faltar na 1ª versão), mesmo espírito de "🔍 Personagem"; "💪
+Fortalecer" virou dropdown "até qual patamar ir" reaproveitando
+`_ViewEscolherAlvo` generalizado) mas só validado por leitura de código,
+sem clique real no Discord - substitui o item anterior (validar "⚡
+Fortalecer ao Máximo"), que não existe mais. Precisa confirmar ao vivo:
+abrir "💖 Waifus" e navegar por TODOS os slots com ◀️/▶️ (vazios e
+ocupados, setas desabilitando certo nas pontas) E com o dropdown (escolher
+um slot longe da posição atual e conferir que pula direto pra lá, com a
+opção certa marcada como `default` da próxima vez que abrir o dropdown;
+cada slot ocupado mostrando classe/CP final/CP base/Nível/Afinidade/ícone
+de categoria, igual todo outro dropdown de personagem do jogo - CP final
+batendo com o "Power atual" mostrado no card, não com o Power natural);
+conferir que o card completo mostra imagem/classe/vínculo + campos de
+Power/Fortalecimento/Ascensão juntos, com o rodapé "X/Y" certo; clicar
+"💪 Fortalecer" e ver o dropdown listando cada patamar com custo
+ACUMULADO certo (bate com a soma de `CUSTOS_FORTALECIMENTO`); escolher a
+1ª opção (equivale ao antigo 1 clique) e a ÚLTIMA (equivale ao antigo
+"gastar tudo") e conferir que ambas cobram/desbloqueiam certo; testar com
+saldo insuficiente pro custo total escolhido (mensagem de erro, nada
+cobrado); conferir que Trocar/Esvaziar/Ascender/Comprar slot continuam
+funcionando iguais dentro do novo navegador.
+
+### Validar 💖 Personagens Favoritas (Fortalecimento/Ascensão) ao vivo (2026-09-03)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Implementado por completo (novo módulo `pandora/personagens_favoritas.py`,
+tabela `colecao_personagens_favoritas`, hook em `torre.power_final`/
+`power_personagem`, botão "💖 Favoritas" no hub) e validado só por
+simulação isolada contra um banco temporário (algoritmo de gap-filling
+batendo com os exemplos do pedido original, Fortalecimento sequencial
+custando certo, `power_personagem` refletindo o Power Base do slot) -
+NENHUM clique real no Discord ainda. Precisa confirmar ao vivo: escolher
+personagem pro slot (Modal de busca), Fortalecer algumas vezes seguidas
+(saldo de Soulstone descontando certo, embed atualizando), trocar a
+personagem do slot e confirmar que o Fortalecimento comprado PERSISTE
+(não reseta) mas a nova personagem só aproveita depois de preencher a
+lacuna dela mesma, e o fluxo de Ascensão (precisa de uma personagem real
+no teto de Nível/Afinidade/Soulmate pra testar de verdade - pode não
+haver uma disponível na conta de teste ainda). Também confirmar que
+"👥 Party"/`/party` (mesma tabela `colecao_equipe`) não foi afetado pela
+remoção da Vitrine.
+
 ### Validar fix de "GAIA nao respondeu a tempo" na Party (Adicionar/Remover/Limpar) ao vivo (2026-09-03)
 
 **Prioridade:** Alta | **Complexidade:** Baixa
@@ -458,7 +562,9 @@ antes de confiar cegamente nisso não atrasar outros ticks do scheduler de
 Também falta: usar item Proteção/Revanche/Chave da Torre/Upgrade de
 Construção/Chamado através da UI de verdade (só as funções de regra de
 negócio foram testadas, os botões do painel "🎒 Inventário" nunca foram
-clicados de verdade), e comprar os 7 itens pela Loja através da UI.
+clicados de verdade), e comprar os 5 itens compráveis (`itens.ITENS_LOJA`
+- Roll/Claim Permanente saíram da Loja em 2026-09-03, ver CHANGELOG.md)
+pela Loja através da UI.
 
 ### Validar Batalha 5x5 com Aposta de Personagem ao vivo no Discord (2026-09-01)
 
@@ -696,20 +802,3 @@ texto "Sua Party" e nos SELECTs de Adicionar/Remover.
   combatentes existentes (a maioria vira "Militar"), inventar classes
   civis novas sem personagem nenhuma pra usá-las ficaria pra uma leva
   futura separada, se fizer sentido.
-
-### Merge não chama `revelar_classe` (achado 2026-08-30, ainda não corrigido)
-
-`economia.py` (Merge - sacrificar 5 personagens por 1 melhor) nunca chama
-`gacha.revelar_classe` na personagem resultante - se ela nunca foi
-reivindicada em NENHUM servidor antes, pode sair do Merge sem classe (o
-mesmo bug de origem corrigido pro claim normal/admin/auto-colecionador,
-mas não pro Merge). Não corrigido ainda - fica registrado.
-
-**Atualização (2026-09-03)**: o MESMO gap existia também na Loja
-"Comprar" e no navegador de Série (`db.comprar_personagem` sozinho nunca
-revelava classe) - corrigido lá com `gacha.comprar_com_revelacao`
-(envelope que chama `revelar_classe` depois da compra, ver CHANGELOG.md).
-Merge continua com o gap - `economia.executar_merge` precisaria do mesmo
-tratamento (`await gacha.revelar_classe(escolhida)` depois de confirmar a
-escolha), só que `economia.py` hoje não é `async` nem importa `gacha` -
-mudança maior que um envelope simples, fica pra quando for revisitado.

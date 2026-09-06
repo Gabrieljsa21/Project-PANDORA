@@ -33,22 +33,42 @@ PESOS_DROP_RARO = {
 # das vitórias não dá nada raro pra maioria dos jogadores.
 CHANCE_DROP_RARO = 0.15
 
-# 🔥 Preços da Loja normal (Seção 14) - primeiro palpite, Roll/Claim
-# Permanente MUITO mais caros de propósito ("devem continuar extremamente
-# restritos mesmo quando aparecerem na loja").
+# 🔥 Preços BASE da Loja normal (Seção 14) - primeiro palpite. Roll/Claim
+# Permanente SAÍRAM da compra por WiShards fixos (2026-09-03, pedido do
+# usuário: "os rolls e calims de dentro doq hj esta em itens, pode
+# remover" - redundante com o Upgrade de Rolls/Claims, que perdeu o teto
+# de nível no mesmo pedido e virou o caminho único pra isso na Loja) -
+# continuam no `CATALOGO_ITENS`/`PESOS_DROP_RARO` acima (nome/descrição +
+# drop raro do World Boss), só saíram de `ITENS_LOJA`/`PRECOS_LOJA_ITENS`.
+# 🔥 Reduzido ~30% (2026-09-03, pedido do usuário: "O preço desses itens
+# esta muito caro. Diminui um pouco") - preço "primeiro palpite" de cima
+# estava alto demais na prática; continua "balanceável depois" como todo
+# valor novo desta sessão, fácil de reajustar aqui de novo se precisar.
 PRECOS_LOJA_ITENS = {
-    "protecao": 3_000, "revanche": 4_000, "chave_da_torre": 5_000,
-    "upgrade_construcao": 6_000, "chamado": 8_000, "roll_permanente": 50_000, "claim_permanente": 60_000,
+    "protecao": 2_100, "revanche": 2_800, "chave_da_torre": 3_500,
+    "upgrade_construcao": 4_200, "chamado": 5_600,
 }
 
-LIMITE_ROLL_PERMANENTE = 5  # Seção 12 - "pode existir um limite máximo" (drop OU compra, contam juntos)
+# 🔥 Itens de fato COMPRÁVEIS na Loja (2026-09-03) - subconjunto de
+# `CATALOGO_ITENS`, exclui Roll/Claim Permanente (ver comentário acima).
+ITENS_LOJA = {chave: dados for chave, dados in CATALOGO_ITENS.items() if chave in PRECOS_LOJA_ITENS}
+
+# 🔥 Preço escalável (2026-09-03, pedido do usuário: "Todos os itens da
+# loja tem q aumentar o preço a medida q são comprados, igual os upgrades
+# de rolls") - crescimento "leve" (escolhido pelo usuário): +15% por
+# unidade já comprada, composto (dobra a cada ~5 compras) - fica pra
+# balanceamento como o resto, fácil de reajustar aqui.
+FATOR_CRESCIMENTO_PRECO_LOJA = 1.15
+
+LIMITE_ROLL_PERMANENTE = 5  # Seção 12 - "pode existir um limite máximo" (só drop agora, ver comentário acima)
 LIMITE_CLAIM_PERMANENTE = 5  # Seção 13 - idem
 
-AREAS_CONSTRUCAO = {
-    "Militar": "Quartel", "Saúde": "Hospital", "Cultura": "Academia",
-    "Administração": "Prefeitura", "Comércio": "Mercado", "Arcano": "Torre Arcana",
-}
-NIVEL_MAXIMO_CONSTRUCAO = 10  # primeiro palpite
+# 🔥 Alias pra `db.AREAS_CONSTRUCAO` (2026-09-03, ver comentário lá) - era
+# um dict área->nome de construção próprio ("Quartel"/"Hospital"/etc,
+# pedido do usuário pra remover: "vc tem distinguindo construção de area,
+# mas é a msm coisa, so use area") - virou o mesmo tuple de 6 áreas que
+# `cidade.FUNCOES_CIDADE` já usava, fonte única em `db.py`.
+AREAS_CONSTRUCAO = db.AREAS_CONSTRUCAO
 BONUS_POR_NIVEL_CONSTRUCAO = 0.10  # +10% de Poder na área, por nível (Seção 10: "melhora permanentemente o efeito")
 
 
@@ -97,37 +117,44 @@ def conceder_item_drop(guild_id, user_id, item):
         if atual >= limite:
             consolacao = 1000
             db.creditar_wishards(guild_id, user_id, consolacao, "worldboss_drop_convertido", item)
-            return f"{nome} (já no limite máximo de {limite} - convertido em +{consolacao} WiShards)"
+            return f"{nome} (já no limite máximo de {limite} - convertido em +{db.fmt_numero(consolacao)} WiShards)"
         db.adicionar_bonus_permanente_drop(guild_id, user_id, campo, 1)
         return f"{nome}!"
     db.adicionar_item(guild_id, user_id, item, 1)
     return f"{nome}!"
 
 
+def preco_unidade_loja(item, unidades_ja_compradas):
+    """Preço da PRÓXIMA unidade desse item, dado quantas o jogador já
+    comprou na Loja antes (vitalício, `db.total_comprado_item` - nunca cai
+    de volta quando o item é usado/consumido). Cresce geométrico
+    (`FATOR_CRESCIMENTO_PRECO_LOJA`) a partir do preço base."""
+    base = PRECOS_LOJA_ITENS[item]
+    return round(base * (FATOR_CRESCIMENTO_PRECO_LOJA ** unidades_ja_compradas))
+
+
+def custo_total_item(guild_id, user_id, item, quantidade):
+    """Soma o preço de CADA unidade de 1..`quantidade`, a partir de quantas
+    já foram compradas antes - mesmo padrão de "custo total até" usado nos
+    upgrades sem teto (`db.custo_total_treinamento_ate` etc.), só que
+    somando UNIDADES em vez de NÍVEIS."""
+    ja_comprado = db.total_comprado_item(guild_id, user_id, item)
+    return sum(preco_unidade_loja(item, ja_comprado + i) for i in range(quantidade))
+
+
 def comprar_item(guild_id, user_id, item, quantidade=1):
-    """Seção 14 - mesmos itens da Loja normal, WiShards como moeda.
-    🔥 2026-09-01, pedido do usuário: "os rolls/claims permanentes
-    vendidos na loja sao contados diferentes se ganhos dos boss" - usa o
-    contador de LOJA (`bonus_permanente_loja`), nunca o de drop - cada um
-    com seu próprio teto independente."""
-    if item not in CATALOGO_ITENS:
-        return False, "Item desconhecido."
-    campo = _campo_permanente(item)
-    if campo is not None:
-        limite = _limite_permanente(campo)
-        atual_rolls, atual_claims = db.bonus_permanente_loja(guild_id, user_id)
-        atual = atual_rolls if campo == "rolls" else atual_claims
-        if atual + quantidade > limite:
-            return False, f"Você já comprou {atual}/{limite} na Loja - comprar {quantidade} passaria do limite máximo (drops do World Boss têm um teto separado)."
-    custo_total = PRECOS_LOJA_ITENS[item] * quantidade
+    """Seção 14 - itens de `ITENS_LOJA` (Roll/Claim Permanente SAÍRAM
+    daqui, 2026-09-03 - ver comentário em `ITENS_LOJA`), WiShards como
+    moeda, preço escalando por unidade já comprada (`custo_total_item`)."""
+    if item not in ITENS_LOJA:
+        return False, "Item não disponível pra compra na Loja."
+    custo_total = custo_total_item(guild_id, user_id, item, quantidade)
     if db.saldo_wishards(guild_id, user_id) < custo_total:
-        return False, f"Custa {custo_total} WiShards e você não tem o suficiente."
+        return False, f"Custa {db.fmt_numero(custo_total)} WiShards e você não tem o suficiente."
     db.creditar_wishards(guild_id, user_id, -custo_total, "loja_item", item)
-    if campo is not None:
-        db.adicionar_bonus_permanente_loja(guild_id, user_id, campo, quantidade)
-    else:
-        db.adicionar_item(guild_id, user_id, item, quantidade)
-    return True, f"Comprado: {CATALOGO_ITENS[item]['nome']} x{quantidade} por {custo_total} WiShards."
+    db.adicionar_item(guild_id, user_id, item, quantidade)
+    db.registrar_compra_item(guild_id, user_id, item, quantidade)
+    return True, f"Comprado: {CATALOGO_ITENS[item]['nome']} x{quantidade} por {db.fmt_numero(custo_total)} WiShards."
 
 
 def usar_protecao(guild_id, user_id, personagem_id):
@@ -158,16 +185,33 @@ def usar_chave_da_torre(guild_id, user_id):
     return True, "🗝️ Chave da Torre ativada - sua PRÓXIMA tentativa de andar ignora a restrição de categoria."
 
 
-def usar_upgrade_construcao(guild_id, user_id, area):
-    """Seção 10 - jogador escolhe ONDE aplicar."""
+def usar_upgrade_construcao(guild_id, user_id, area, quantidade=1):
+    """Seção 10 - jogador escolhe ONDE aplicar, agora em LOTE (2026-09-03,
+    pedido do usuário: "alguns pode permitir usar varios por vez, como o
+    upgrade de construção, q upo a msm construção varios lv por vez").
+
+    Teto DINÂMICO (`db.teto_atual_construcao` - sobe +10 só quando TODAS
+    as áreas já bateram o teto anterior, ver comentário lá) em vez do
+    antigo teto FIXO por área: `quantidade` é clampada em silêncio pro
+    que sobra até o teto vigente (nunca falha por causa disso sozinho -
+    pedir mais do que cabe só aplica o que cabe, mesmo espírito de nunca
+    perder uma compra por arredondamento). Falta de ITEM continua sendo
+    um erro explícito (mesma régua de "não tem WiShards suficiente" do
+    resto da Loja) - os dois motivos de falha são de natureza diferente
+    (teto é um limite estrutural do jogo, item é um recurso que falta)."""
     if area not in AREAS_CONSTRUCAO:
         return False, "Área inválida."
-    if db.nivel_construcao(guild_id, user_id, area) >= NIVEL_MAXIMO_CONSTRUCAO:
-        return False, f"{AREAS_CONSTRUCAO[area]} já está no nível máximo ({NIVEL_MAXIMO_CONSTRUCAO})."
-    if not db.consumir_item(guild_id, user_id, "upgrade_construcao", 1):
-        return False, "Você não tem nenhum Upgrade de Construção."
-    novo_nivel = db.subir_construcao(guild_id, user_id, area)
-    return True, f"🏗️ {AREAS_CONSTRUCAO[area]} ({area}) subiu pro Nível {novo_nivel}!"
+    nivel_atual = db.nivel_construcao(guild_id, user_id, area)
+    teto = db.teto_atual_construcao(guild_id, user_id)
+    if nivel_atual >= teto:
+        return False, f"{area} já está no teto atual (Nível {teto}) - suba as outras áreas até lá pro teto aumentar."
+    quantidade = min(quantidade, teto - nivel_atual)
+    disponivel = db.quantidade_item(guild_id, user_id, "upgrade_construcao")
+    if disponivel < quantidade:
+        return False, f"Você só tem {disponivel} Upgrade(s) de Construção - precisa de {quantidade} pra chegar no Nível {nivel_atual + quantidade}."
+    db.consumir_item(guild_id, user_id, "upgrade_construcao", quantidade)
+    novo_nivel = db.subir_construcao(guild_id, user_id, area, quantidade)
+    return True, f"🏗️ {area} subiu pro Nível {novo_nivel} (+{quantidade})!"
 
 
 def usar_chamado(guild_id, user_id, boss_tipo):

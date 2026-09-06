@@ -10,6 +10,14 @@ regredir os 2 bugs de timeout já corrigidos no Colecionador antes da
 extração. Quem tem a conexão Discord (hoje só o Project-ERIS) importa este
 pacote DIRETO (`from pandora import gacha, paineis, ...`), zero rede."""
 import os
+from datetime import timedelta, timezone
+
+# 🔥 Fuso fixo de Brasília (2026-09-03, extraído de `pandora.worldboss` pra
+# ser compartilhado com a Recompensa Diária, que também precisa resetar no
+# horário de parede local, não UTC) - sem observação de horário de verão no
+# Brasil desde 2019, offset fixo é CORRETO, não uma aproximação; evita
+# depender do pacote `tzdata` (não vem por padrão no Python do Windows).
+FUSO_BRASILIA = timezone(timedelta(hours=-3))
 
 PASTA_PROJETO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PASTA_DADOS = os.path.join(PASTA_PROJETO, "data")

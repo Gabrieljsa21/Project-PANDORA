@@ -36,8 +36,10 @@ from pandora import db, itens, torre
 # classe (combatente ou civil) mapeia OBRIGATORIAMENTE pra uma destas,
 # nunca uma função nova (mesmo princípio de `categoria_combate`: a IA
 # decide o aberto/temático - a classe -, o código valida o fechado/
-# mecânico - a função).
-FUNCOES_CIDADE = ("Militar", "Saúde", "Cultura", "Administração", "Comércio", "Arcano")
+# mecânico - a função). Alias pra `db.AREAS_CONSTRUCAO` (2026-09-03,
+# unificado com o que era `itens.AREAS_CONSTRUCAO`, mesma lista - ver
+# comentário lá) - era um tuple próprio idêntico, fonte única agora.
+FUNCOES_CIDADE = db.AREAS_CONSTRUCAO
 
 _ICONE_FUNCAO = {
     "Militar": "⚔️", "Saúde": "⚕️", "Cultura": "🎭",
@@ -117,7 +119,7 @@ def _workforce_por_funcao(guild_id, user_id):
     equipe_party = db.obter_equipe(guild_id, user_id, "party")
     ids_na_party = {p["id"] for p in equipe_party.values()}
     colecao = db.colecao_do_usuario(guild_id, user_id)
-    niveis, bonus_global, cache_classe, bonus_series = torre._contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = torre._contexto_lote(guild_id, user_id)
 
     cp_total_colecao = 0.0
     por_funcao = {}
@@ -125,7 +127,7 @@ def _workforce_por_funcao(guild_id, user_id):
         nivel = niveis.get(personagem["id"], 1)
         power, _nivel, _categoria = torre.power_personagem(
             personagem, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
-            bonus_series=bonus_series,
+            bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
         )
         cp_total_colecao += power
         if personagem["id"] in ids_na_party:
