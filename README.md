@@ -17,7 +17,7 @@ conexão Discord (hoje só o [Project-ERIS](../Project-ERIS)) importa este
 pacote DIRETO via dependência de path (`uv`, `pyproject.toml` do ERIS), sem
 rede envolvida.
 
-Arquitetura completa e decisões de design em [`ARQUITETURA.md`](ARQUITETURA.md).
+Arquitetura completa e decisões de design em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md).
 
 ## A origem do nome
 
@@ -43,7 +43,7 @@ de antes da extração).
 Se você tem um `data/eris.db` de antes da extração (2026-08-29), rode:
 
 ```bash
-python migrar_de_eris.py [caminho pro eris.db, opcional - default ../Project-ERIS/data/eris.db]
+python scripts/migrar_de_eris.py [caminho pro eris.db, opcional - default ../Project-ERIS/data/eris.db]
 ```
 
 Copia as 14 tabelas `colecao_*` inteiras (`INSERT OR IGNORE`, seguro rodar

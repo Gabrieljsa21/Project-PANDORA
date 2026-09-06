@@ -3,9 +3,11 @@
 (este repo), rodada 1x manualmente na extração do Colecionador (2026-08-29).
 NÃO é uma migração aditiva de schema (isso continua em `pandora.db.
 inicializar()`) - é mudança de ARQUIVO, então fica fora do fluxo normal de
-boot, só roda quando alguém chama explicitamente:
+boot, só roda quando alguém chama explicitamente (SEMPRE a partir da raiz
+do repo, não de dentro de `scripts/` - o caminho padrão do eris.db é
+relativo à raiz):
 
-    python migrar_de_eris.py [caminho pro eris.db, opcional]
+    python scripts/migrar_de_eris.py [caminho pro eris.db, opcional]
 
 Copia as 14 tabelas `colecao_*` inteiras (`INSERT OR IGNORE`, seguro rodar
 mais de uma vez sem duplicar) - NUNCA apaga nada do `eris.db` original, só lê.
@@ -59,5 +61,9 @@ def migrar(caminho_eris_db):
 
 
 if __name__ == "__main__":
-    caminho_padrao = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Project-ERIS", "data", "eris.db")
+    # 🔥 2 ".." (não 1) - o script mora em `scripts/` desde a reorganização
+    # de raiz (2026-09-06), então precisa subir um nível a mais que antes
+    # (`scripts/` -> raiz do PANDORA -> `C:\Workspace`) pra achar o repo
+    # irmão `Project-ERIS`.
+    caminho_padrao = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Project-ERIS", "data", "eris.db")
     migrar(sys.argv[1] if len(sys.argv) > 1 else os.path.normpath(caminho_padrao))

@@ -1824,9 +1824,10 @@ tbm. E aumente o limite de series para 25 se conseguir".
   do usuário). Card = MESMO `consulta.embed_carta_personagem` de sempre +
   campo "Status" com 3 estados (🛒 Disponível com preço/botão Comprar
   habilitado, ✅ Já é sua com CP, 🔒 Possuída por outro jogador
-  mencionando quem) + "⭐ Favoritar/Desfavoritar" (só habilitado quando
-  `dono_id == autor` - favoritar é sobre a COLEÇÃO do jogador, `db.
-  favoritos_listar` exige posse). "🛒 Comprar" reaproveita `db.
+  mencionando quem) + "⭐ Favoritar/Desfavoritar" (nessa época ainda só
+  habilitado quando `dono_id == autor` - restrição removida em 2026-09-03
+  na fusão Favoritos+Wishlist, ver seção correspondente mais abaixo).
+  "🛒 Comprar" reaproveita `db.
   comprar_personagem` (MESMA função da Loja de verdade, preço/corrida
   idênticos) e atualiza o `dono_id` LOCAL na hora (sem isso o card
   continuaria mostrando "Disponível" até reabrir, e o botão Favoritar
@@ -1886,6 +1887,493 @@ de dado:
   bloco 101-125, pulo de bloco pro vizinho certo, busca por posição 120
   e por nome "sasuke" resolvendo certo, posição além do total clampando
   pro fim - mesma bateria de testes já usada pra validar `_ViewNivel`.
+
+## 4 correções/melhorias de 2026-09-03 (Classes, Perfil, Diária, Loja)
+
+Ver CHANGELOG.md pro texto completo com as citações do usuário - aqui só o
+"porquê" técnico de cada uma.
+
+**Classes - Merge era o último buraco.** `gacha.revelar_classe` só roda
+hoje em 4 pontos: claim normal (`_processar_claim`), claim sem cooldown
+(admin/auto-colecionador, `_claim_sem_cooldown`), e compra (`gacha.
+comprar_com_revelacao`, Loja/navegador de série). `economia.executar_merge`
+reivindica a personagem escolhida direto via `db.reivindicar` - nunca
+passou por nenhum desses 4. Corrigido chamando `await gacha.revelar_classe
+(escolhida)` de dentro de `paineis._ViewEscolherMergeAlvo._escolher`
+(depois do merge confirmar sucesso), não dentro de `economia.py` - evita a
+reestruturação maior que exigiria tornar `economia.py` `async`/importar
+`gacha` só pra isso (mesma razão que tinha deixado esse gap registrado no
+TODO.md desde 2026-08-30). `db.personagens_possuidos_sem_classe`/
+`contar_personagens_possuidos_sem_classe` (novas) + `/pandora_admin
+validar_classes` cobrem o que ficou classless de ANTES desse fix (ou de
+uma GAIA fora do ar na hora).
+
+**Perfil - truncamento era estrutural, não um bug de tamanho.** O campo
+"❤️ Séries Favoritas" juntava N séries num `"\n\n".join(linhas)[:1024]` -
+um ÚNICO campo de embed tem teto de 1024 chars, bem menor que o total real
+com até 25 séries (~5 linhas cada). Como o embed inteiro aceita até 25
+CAMPOS com 6000 chars de soma, a correção certa nunca foi "cortar menos" -
+foi trocar de "1 campo com tudo" pra "1 campo por série"
+(`_montar_embed_series_favoritas`), o que também elimina o corte por
+construção (nunca mais existe um único campo grande o bastante pra
+estourar). Movido pra trás de um botão (`_ViewPerfil._series`, mesmo
+painel do hub via `_enviar_series_favoritas` compartilhado) em vez de ficar
+inline no embed principal - `_montar_embed_perfil` parou de chamar `series_
+favoritas.listar` (documentado como caro - varre a coleção inteira
+filtrada por série) toda vez que o Perfil abre.
+
+**Recompensa Diária - UTC não é "meia-noite" no Brasil.** `diaria_
+disponivel`/`reivindicar_diaria` comparavam `.date()` em UTC - com
+Brasília fixo em UTC-3 (mesmo raciocínio já usado no World Boss, sem
+horário de verão desde 2019), isso liberava o resgate de novo às 21h
+locais. `FUSO_BRASILIA` migrou de `pandora.worldboss` (onde só ele usava)
+pra `pandora.config` (compartilhado agora); a comparação de data em `db.py`
+passou a `.astimezone(FUSO_BRASILIA).date()` antes de comparar - o
+timestamp GRAVADO continua em UTC (consistente com o resto do banco), só a
+pergunta "já virou o dia?" mudou de fuso.
+
+**Loja - preço escalável + upgrade sem teto + itens direto como botão,
+as 3 mudanças se encaixam.** Removido o teto de nível 5 do Upgrade de
+Rolls/Claims (`db.comprar_upgrade_rolls_ate`/`comprar_upgrade_claims_ate`
+substituem as versões de 1-nível-por-clique, mesmo padrão "pula direto pro
+alvo, soma o custo de cada degrau" de Treinamento Global/Potencial da
+Coleção) tornou Roll/Claim Permanente (item da Loja normal, preço fixo,
+teto de 5 compras) redundante - removidos de `itens.ITENS_LOJA` (mas NÃO
+de `itens.CATALOGO_ITENS`/`PESOS_DROP_RARO` - o World Boss continua
+podendo dropar os dois normalmente, só a compra direta por WiShards fixos
+saiu). Sobrando 5 itens compráveis, o wrapper "🎁 Itens" -> dropdown
+(`_ViewLojaItens`, removida) virou 5 botões diretos na Loja - "poucos
+itens" deixou de justificar o nível extra de navegação. Preço escalável
+(`itens.custo_total_item`/`preco_unidade_loja`, +15% composto por unidade
+já comprada) precisou de um contador NOVO (`colecao_compras_item`,
+`db.total_comprado_item`/`registrar_compra_item`) - deliberadamente
+separado de `colecao_inventario.quantidade` (que cai quando o item é
+usado): o preço tem que continuar subindo mesmo depois do jogador gastar o
+que comprou. Cada botão de item + os 2 Upgrades agora abrem
+`_ViewEscolherAlvo` (mesma classe genérica que Treinamento Global/
+Potencial da Coleção já usavam) pra comprar em lote, mostrando saldo +
+preço total por opção antes de confirmar.
+
+## Upgrade de Construção em lote + teto dinâmico da Cidade (2026-09-03)
+
+**Unificação de área/construção primeiro, teto depois - a 2ª mudança
+dependia da 1ª.** `itens.AREAS_CONSTRUCAO` (dict área->nome de construção,
+"Militar"->"Quartel") e `cidade.FUNCOES_CIDADE` (tuple das mesmas 6 áreas)
+eram 2 listas independentes descrevendo o MESMO domínio fechado - o pedido
+do usuário ("vc tem distinguindo construção de area, mas é a msm coisa")
+só foi possível resolver de verdade escolhendo ONDE a lista canônica devia
+morar: `db.py`, porque o teto dinâmico (`teto_atual_construcao`) PRECISA
+enxergar todas as 6 áreas pra calcular o mínimo entre elas, e `db.py` não
+pode importar nem `itens.py` nem `cidade.py` (os dois já importam `db.py` -
+ciclo). `AREAS_CONSTRUCAO = (...)` virou a fonte única em `db.py`;
+`itens.AREAS_CONSTRUCAO`/`cidade.FUNCOES_CIDADE` viraram aliases (`=
+db.AREAS_CONSTRUCAO`) - zero duplicação de string daqui pra frente.
+
+**Teto dinâmico é sempre CALCULADO, nunca GRAVADO.** `db.teto_atual_
+construcao(guild_id, user_id)` lê `niveis_construcoes` (já existia), pega
+o MÍNIMO entre as 6 áreas (área nunca comprada conta como 0 - o pior caso)
+e aplica `NIVEL_MAXIMO_CONSTRUCAO_BASE * (nivel_minimo // BASE + 1)`. Não
+existe um "evento de destravar o teto" nem uma coluna nova pra isso - no
+instante em que a última área atrasada bate o teto velho, a PRÓXIMA
+leitura de `teto_atual_construcao` (a próxima vez que alguém tenta subir
+QUALQUER área, ou abre o Inventário/Cidade) já devolve o teto novo
+automaticamente. Isso também significa que o teto pode, em teoria,
+DESCER se uma área nova aparecer no futuro com nível 0 enquanto as outras
+já subiram - não é um cenário possível hoje (as 6 áreas são fixas, taxonomia
+fechada), mas vale registrar que a função não tem estado próprio pra
+proteger contra isso, é pura função do estado atual das 6 áreas.
+
+**Uso em lote: `quantidade` clampada pro teto, mas NUNCA pra itens
+faltando.** `itens.usar_upgrade_construcao(guild_id, user_id, area,
+quantidade=1)` trata os 2 motivos de "não dá pra completar o pedido"
+como coisas DIFERENTES: pedir mais do que cabe até o teto (`quantidade =
+min(quantidade, teto - nivel_atual)`) é um limite ESTRUTURAL do jogo -
+aplica o que cabe, sem erro, e a mensagem de sucesso já reflete o
+`quantidade` real aplicado ("+10" em vez do "+15" pedido, no teste). Não
+ter Upgrade de Construção suficiente (`db.quantidade_item` < `quantidade`
+já clampada) é falta de RECURSO - falha explícita com os números exatos
+("Você só tem X - precisa de Y"), mesma régua de "não tem WiShards
+suficiente" usada em todo o resto da Loja. `db.subir_construcao` também
+ganhou `quantidade` (era sempre +1) - grava o lote inteiro num único
+`UPDATE ... SET nivel = nivel + excluded.nivel`, não um loop de N updates.
+
+**UI reaproveita `_ViewEscolherAlvo` genérico** (mesma classe usada por
+Treinamento Global/Potencial da Coleção/Upgrade de Rolls/Claims) em vez de
+inventar um componente novo - só troca a "unidade" pra "Upgrade(s) de
+Construção" em vez de WiShards, e o `custo_total_fn` vira uma subtração
+simples (`alvo - nivel_atual`, 1 upgrade por nível) em vez de uma soma de
+preços progressivos. O 1º passo (escolher a ÁREA) agora mostra "Nível
+N/teto" em cada opção, então o jogador já vê quem está atrasado antes de
+escolher onde investir.
+
+**Cidade ganhou visibilidade do Nível de Construção** (pedido: "informa
+na cidade o lv dessas construcoes") - `_embed_cidade` ganhou `guild_id`/
+`user_id` (antes só recebia `resultado` de `cidade.coletar_producao_
+pendente`) pra buscar `db.nivel_construcao`. 1ª versão acrescentava uma
+linha própria "🏗️ Construção: Nível N/teto" no VALOR de cada card - o
+usuário, vendo o resultado ao vivo, pediu formato mais compacto: "n
+precisar colocar o campo construcao, é so por lv X na frente, Ex: ⚔️
+Militar - Lv10" - o nível foi pro TÍTULO do card (`f"{icone} {funcao} -
+Lv{nivel}"`), sem campo/linha extra, e sem mostrar o teto ali (só o
+Inventário mostra "/teto" - exemplo do usuário não pedia isso na Cidade).
+
+**Preços da Loja de Itens reduzidos ~30%** (pedido: "O preço desses
+itens esta muito caro. Diminui um pouco") - `itens.PRECOS_LOJA_ITENS`
+(Proteção/Revanche/Chave da Torre/Upgrade de Construção/Chamado) - eram
+"primeiro palpite" documentados como "balanceável depois"; cortados de
+forma consistente (mesmo fator pra todos) em vez de escolhidos um a um,
+fácil de reajustar nesse mesmo lugar se ainda estiver caro/barato demais.
+
+## 💖 Personagens Favoritas - Fortalecimento/Ascensão + remoção da Vitrine (2026-09-03)
+
+Pedido do usuário veio como uma spec de 13 seções já fechada (patamares,
+custos, exemplos numéricos de gap-filling) - o trabalho real de design foi
+achar que os exemplos 4/5/6/7/10 do pedido são todos resolvidos por UM
+algoritmo só (`personagens_favoritas._estado_fortalecimento`), não um caso
+especial por exemplo.
+
+**Por que bitmask, não lista.** 14 patamares fixos (300→1000, 50 em 50)
+nunca mudam - um `INTEGER` com bit `i` = patamar `i` comprado NESSE slot
+é literalmente mais simples que uma lista de strings/JSON, e a consulta
+"esse patamar já foi comprado?" vira uma AND bit a bit em vez de parsing.
+Ascensão (sem teto, sempre sequencial) já é um contador simples,
+`nivel_ascensao` - não precisa de bitmask porque nunca tem lacuna (mesmo
+padrão de todo outro "nível de upgrade" do projeto).
+
+**O algoritmo central resolve gap-filling sem casos especiais:**
+```python
+def _estado_fortalecimento(popularidade, bitmask):
+    atual = torre.power_base(popularidade)  # fórmula original, intocada
+    for indice, (_lo, hi) in enumerate(PATAMARES_FORTALECIMENTO):
+        if atual >= hi:
+            continue  # natural já superou esse patamar - nunca precisa comprar
+        if bitmask & (1 << indice):
+            atual = hi  # patamar comprado NESSE slot - sobe
+        else:
+            return atual, indice  # lacuna - para aqui, é o próximo a comprar
+    return atual, None  # 1000 atingido, só Ascensão daqui pra frente
+```
+Isso sozinho cobre: personagem de Power natural alto entrando num slot
+zerado (pula os patamares abaixo do natural sem checar bit nenhum);
+personagem de Power natural baixo entrando num slot com patamares ALTOS
+já comprados (para na primeira lacuna, mesmo que 900→950/950→1000 já
+estejam comprados - só alcança eles depois de preencher tudo abaixo);
+Power natural desalinhado tipo 873 (o próximo patamar é sempre o GLOBAL
+seguinte - 850→900 - custando o preço CHEIO daquele patamar, nunca uma
+fração proporcional à distância real coberta).
+
+**O hook no Power Base é a parte que precisava de mais cuidado pra não
+violar a regra "não alterar a fórmula original".** `torre.power_final`
+já fazia `(power_base(popularidade) + bônus_nível) × multiplicador`;
+virou `power_final(..., power_base_override=None)` - quando presente,
+SUBSTITUI só a chamada a `power_base(popularidade)`, o resto da fórmula
+(bônus de nível fixo, multiplicador de Afinidade/Soulmate) roda
+IDÊNTICO. `torre.power_personagem` ganhou `favoritas_ocupantes`
+(opcional, dict pré-carregado) - mesmo padrão já estabelecido por
+`bonus_series` (Série Favorita): calculado em lote 1x por
+`_contexto_lote` (5º elemento da tupla agora), nunca consultado por
+personagem individual no caminho quente. Isso obrigou atualizar TODO
+call site que desempacota essa tupla (`torre.py` x2, `cidade.py`,
+`worldboss.py`, `paineis._descricao_personagem_dropdown` - esse último
+sozinho já cobre Merge/Party/Trocar de personagem, é o helper central
+reaproveitado por todo select de personagem do pacote).
+
+**Ciclo de import evitado com import local, não reestruturação.**
+`personagens_favoritas.py` precisa de `torre.power_base` (a fórmula
+natural); `torre.py` precisa de `personagens_favoritas.power_efetivo`/
+`elegivel_ascensao` pro hook. Import nos 2 topos seria um ciclo -
+resolvido com `from pandora import personagens_favoritas` DENTRO de
+`power_personagem` (não no topo de `torre.py`), mesmo padrão já usado em
+`itens.usar_chamado` (import local de `worldboss` pelo mesmo motivo,
+achado nesta sessão ao revisar o precedente antes de decidir).
+
+**Validado contra um banco temporário isolado** (não o real): favoritar
+uma personagem nova sem nenhum Fortalecimento comprado mantém Power
+natural exato; 3 Fortalecimentos sequenciais (300→350→400→450) custam
+50/100/250 Soulstone, batendo com a tabela do pedido; `power_personagem`
+com o slot aplicado via `favoritas_ocupantes` reflete exatamente +150 de
+Power Base sobre o mesmo cálculo sem o hook (a soma dos 3 patamares) -
+confirma que a substituição é puramente aditiva, o resto da fórmula
+(bônus global/classe/série, que também estavam ativos no teste) não foi
+tocado por engano.
+
+**Vitrine removida** (mostruário público, `/vitrine` no ERIS - nunca
+teve botão no hub `/pandora`, então a remoção não afeta nenhum fluxo já
+em uso pelo hub) - substituída em espírito pelo sistema novo.
+`colecao_equipe` (tabela compartilhada por Party/Vitrine via `tipo`)
+continua genérica, sem migração - linhas antigas com `tipo="vitrine"`
+(se existirem) ficam órfãs e inertes, mesmo padrão de "nunca migração
+destrutiva" já usado no projeto inteiro.
+
+## Falha de classificação silenciosa em "Comprar Tudo" (2026-09-05)
+
+Achado do usuário: "quando estou dentro das coleções, e mando comprar tudo,
+as personagens compradas estão vindo sem classe". Causa raiz já era
+conhecida (ver "4 correções/melhorias de 2026-09-03" acima - cota diária de
+tokens da Groq só aguenta ~23 classificações reais por dia), mas
+`gacha.comprar_com_revelacao` não tinha como AVISAR quem chamou quando isso
+acontecia: `revelar_classe` roda sobre uma cópia FRESCA do personagem
+(`db.personagem_por_id`, não o dict que o chamador já tinha em mãos) e o
+resultado nunca voltava pro chamador - a compra em si sempre reportava
+sucesso (`ok=True`), então "Comprar Tudo" numa série grande (facilmente mais
+de 23 personagens livres) estourava a cota no meio do lote e ninguém
+percebia até auditar depois com `/pandora_admin validar_classes`.
+
+Corrigido devolvendo um 3º valor, `tem_classe` (`None` se `ok=False`,
+True/False se `ok=True`) - `_sufixo_aviso_sem_classe` (novo, `paineis.py`)
+vira um aviso "⚠️ sem classe ainda... `/pandora_admin validar_classes`
+tenta de novo depois" anexado à mensagem de resposta nos 4 pontos que
+compram personagem (Loja "Comprar" da série/navegador, "Comprar Tudo",
+Loja principal). Nenhuma mudança na causa raiz em si (cota da Groq) - o
+comando de auditoria já existente continua sendo a retentativa real, isto
+só torna o gap VISÍVEL na hora em vez de silencioso.
+
+## "⚡ Fortalecer ao Máximo" nas Waifus (2026-09-06)
+
+Pedido do usuário: "Na tela de waifus, permita fortalecer varios leveis".
+`personagens_favoritas.fortalecer` (Seção do sistema de Personagens
+Favoritas, ver seção própria mais abaixo/CHANGELOG de 2026-09-03) só
+avançava 1 dos 14 patamares de Fortalecimento por chamada - o botão "💪
+Fortalecer" (`_ViewDetalheFavorita`) exigia clicar (e esperar o Discord
+responder) repetidamente pra subir vários patamares de uma vez, mesmo com
+saldo de Soulstone suficiente pra todos de cara.
+
+**`personagens_favoritas.fortalecer_em_massa`** (novo) reaproveita as
+MESMAS constantes/regra de preço de `fortalecer`
+(`CUSTOS_FORTALECIMENTO`/`PATAMARES_FORTALECIMENTO`/
+`_estado_fortalecimento` - nunca duplicadas) num loop que gasta o saldo
+ATUAL de Soulstone em quantos patamares couberem, em sequência, parando no
+1º que não couber OU ao chegar no Fortalecimento máximo (1000). Não é uma
+chamada em loop de `fortalecer()` em si (isso reconsultaria o banco a cada
+patamar, até 14x à toa) - o loop lê `linha`/`personagem`/saldo UMA vez e
+segue em memória, só gravando no banco (`db.creditar_soulstone`/
+`db.marcar_patamar_fortalecimento`) por patamar comprado de verdade.
+Devolve `(ok, mensagem)` - `ok=False` só quando NENHUM patamar coube (saldo
+zerado ou já no máximo); sucesso PARCIAL (1+, mas não os 14) ainda conta
+como sucesso, com a mensagem reportando quantos patamares/qual faixa final
+(ex.: "Fortalecido 3 patamar(es)! 450→600...").
+
+**UI:** novo botão "⚡ Fortalecer ao Máximo" ao lado do "💪 Fortalecer"
+comum em `_ViewDetalheFavorita._montar_botoes` (mesma condição de
+visibilidade - só aparece quando `item["proximo_fortalecimento"]` existe) -
+"💪 Fortalecer" NÃO foi removido, continua servindo quem prefere controle
+fino de 1 patamar por vez (ex.: pra não gastar Soulstone que quer guardar
+pra outra coisa). Nenhuma mudança de schema/tabela - só uma função nova +
+1 botão novo.
+
+## Dropdowns de personagem padronizados (classe + CP base) + 3 bugs reais (2026-09-06)
+
+Usuário mandou uma imagem do dropdown da Party (formato "🛡️ Nome #443
+⭐⭐⭐⭐ Nv.10 · CP 142,8K · 💞10") como referência do padrão esperado em
+QUALQUER select de personagem, com um pedido extra: mostrar também **CP
+base** (`torre.power_base(popularidade)` - Power Base natural, 300-1000,
+puramente da popularidade da personagem, sem Nível/Afinidade/Soulmate/
+bônus nenhum) "relacionado à mecânica de waifu" - é esse número que decide
+quantos patamares de Fortalecimento de um slot de Waifu a personagem já
+cobre sozinha (`personagens_favoritas._estado_fortalecimento`), então é o
+dado relevante na hora de escolher quem colocar num slot. Junto, pedido
+pra mostrar a classe também (não só o ícone de categoria).
+
+**`_descricao_personagem_dropdown`** (formatador único já usado por Party/
+Merge/"🔍 Personagem" desde 2026-08-30) ganhou os 2 campos. Auditoria dos
+OUTROS selects de personagem do pacote achou vários que nunca passavam
+`descricao=` nenhum pro `_ModalBuscarPersonagem`/`_ViewSelecionarPersonagem`
+(caíam no fallback simples, `#id · estrelas` ou só `#id`) - todos
+corrigidos pra passar o formatador certo: "Trocar/Escolher personagem"
+(Waifus), Batalha (escolher personagem alheia - usa o `contexto_lote` do
+ALVO, não de quem desafia), Proteção, Prova de Soulmate.
+
+**Novo `_descricao_personagem_livre_dropdown`** - 3 selects listam
+personagens SEM um dono fixo consultável (Fusão - escolher quem RECEBER,
+entre livres do servidor; Loja "Comprar"; Revanche - "perdidas", cada uma
+com um dono ATUAL diferente, quem venceu aquela Batalha) - Nível/Afinidade
+não fariam sentido nesses 3 (não tem 1 conta certa pra consultar), mas
+classe + CP base + categoria (`torre.categoria_personagem`, função PURA -
+só olha `personagem["classe"]`, funciona igual sem dono nenhum) continuam
+fazendo sentido e agora aparecem lá também.
+
+**Achado real no processo, "A lista dos personagens de troca, fusão esta
+errado":** o select de "🔄 Trocas" (`_ViewEscolherPersonagensTroca`) NUNCA
+usava `_descricao_personagem_dropdown` - montava `SelectOption` direto com
+só nome+estrelas, o único select de personagem do pacote inteiro sem
+NENHUM detalhe (CP/nível/afinidade/classe). Corrigido usando o dono certo
+por etapa (proponente na etapa "oferece", alvo na etapa "pede" - cada uma
+precisa do PRÓPRIO `contexto_lote`, calculado na hora certa em
+`_ViewEscolherAlvoTroca._selecionou`/`_ViewEscolherPersonagensTroca.
+_avancar`). Fusão, em contraste, já usava o formatador certo desde sempre -
+só ficou mais completa com os 2 campos novos.
+
+**"O botão Coleção dentro de Perfil nao responde":** `_ViewPerfil._colecao`
+chamava `ViewColecaoHub.colecao_minha_ordenada` (documentado como caro -
+ordena a coleção INTEIRA por CP) ANTES de `interaction.response.
+send_message` - mesma classe de bug "GAIA não respondeu a tempo" corrigida
+dezenas de vezes neste projeto em outros pontos, essa instância específica
+nunca tinha sido reportada. `defer()` + `followup.send` resolvem, mesmo
+padrão de sempre.
+
+**"Pode remover... Slot de Serie Favorita na loja":** removido o botão +
+`_upgrade_slot_serie_favorita` da `_ViewLoja` - era uma duplicata completa
+do botão "Comprar slot" que já existe dentro de `_ViewSeriesFavoritas`
+(mesmo `db.comprar_slot_serie_favorita`/tabela de preços por trás), sem
+nenhuma vantagem por estar também na Loja. O slot de Waifu nunca teve
+essa duplicata pra começar - agora os dois sistemas seguem o mesmo padrão
+(slot comprado só de dentro da própria tela).
+
+**"quero ver as imagens das personagens... com as classes e tudo":**
+`_ViewDetalheFavorita.montar_embed` reconstruía um `discord.Embed` do zero
+(só nome em texto, nenhuma imagem, nenhuma classe) - trocado por
+`consulta.embed_carta_personagem(p)` (o MESMO card completo que "🔍
+Personagem" usa - imagem via `set_image`, classe, série, vínculo de
+Afinidade/Soulmate) como base, com os campos específicos do slot (Power
+natural/atual, Fortalecimento/Ascensão) adicionados por cima via
+`add_field`. **Atualização no mesmo dia** (ver seção seguinte): a lista de
+slots em texto puro descrita aqui foi substituída por um navegador com
+setas - o card completo agora é a ÚNICA tela, não mais algo que só aparece
+ao abrir 1 slot por vez.
+
+Nenhuma mudança de schema. Validado só por leitura de código (sem clique
+real no Discord) - ver `docs/TODO.md`.
+
+## Waifus: navegador com setas + Fortalecer virou dropdown (2026-09-06)
+
+Mesmo dia da leva anterior, pedido novo do usuário depois de ver o card
+completo funcionando: "quero q na propria tela de waifus, q lista os
+slots, seja como a tela de personagens, q tem as setas p ver as imagens e
+dados detalhados de cada uma" + "ao selecionar um slot, o botao de
+fortalecer dentro dele tem de permitir fortalecer varios niveis por vez,
+por um dropdown igual nos outros locais, mostrando custo e qnt tenho".
+
+**Navegador único.** `_ViewPersonagensFavoritas` (lista em texto + Select
+de slot, mensagem própria) e `_ViewDetalheFavorita` (card de detalhe,
+OUTRA mensagem separada aberta ao escolher um slot) viraram uma única
+classe, no mesmo espírito de `_ViewNivel` ("🔍 Personagem"): `self._indice`
+guarda a posição atual dentro de `self._slots` (lista inteira, carregada
+1x em `criar()` - diferente de "🔍 Personagem", nunca precisa paginar em
+blocos de 25, porque o total de slots é sempre pequeno, `SLOTS_MAXIMO` no
+máximo). ◀️/▶️ trocam `self._indice` e redesenham; `montar_embed()` sempre
+devolve o card completo (via `consulta.embed_carta_personagem`, ver seção
+anterior) do slot atual, com rodapé "posição/total". Todas as ações
+(Fortalecer/Ascender/Trocar/Esvaziar/Comprar slot) passaram a operar sobre
+`self._item` (property que resolve `self._slots[self._indice]`) em vez de
+um `self._item` fixo recebido no construtor.
+
+**Correção no mesmo dia:** a 1ª versão desta leva derrubou por completo o
+Select "escolher um slot" da tela antiga, sobrando só as setas - achado do
+usuário ("Ficou faltando o dropdown p ir rapido para os personagens na
+tela de waifu"). `_montar_select_slots` devolveu o dropdown (row 0, acima
+das setas na row 1) - agora, igual "🔍 Personagem", a tela tem os DOIS
+jeitos de navegar ao mesmo tempo (setas pra 1 passo, dropdown pra pular
+direto), nunca só um dos dois.
+
+**2ª correção, mesmo dia:** a description desse dropdown novo começou com
+um texto PRÓPRIO (só nome + "Power atual" do slot) - achado do usuário
+("Nesse dropdown de slot era p ser igual dos outros personagens, mostrando
+todas aquelas infos"). Trocado por `_descricao_personagem_dropdown`, o
+MESMO formato padrão de Party/Merge/Trocas/"🔍 Personagem" (classe, CP
+final, CP base, Nível, Afinidade, ícone de categoria) - `torre.
+power_personagem` já detecta sozinho, via `favoritas_ocupantes` (parte do
+`_contexto_lote`), que a personagem ocupa ESSE slot, e usa o Power Base
+EFETIVO do slot (com Fortalecimento/Ascensão) em vez do natural pro CP
+final; "CP base" continua sendo o natural, puro, útil justamente pra
+comparar contra o CP final boostado pelo slot. `criar()`/`_atualizar()`
+passaram a pré-carregar `torre._contexto_lote` 1x (guardado em
+`self._contexto_lote`) - sem isso, descrever cada slot ocupado abriria sua
+própria consulta, o mesmo tipo de custo que a correção da Party (seção
+anterior) já eliminou noutro lugar.
+
+**3ª correção, mesmo dia:** "Adiciona o Power Atual na frente do nome do
+personagem" - o RÓTULO (`label`, a 1ª linha da opção, diferente da
+`description` que já mostra o CP completo) ganhou o `power_atual` do
+PRÓPRIO slot (não o CP de `_descricao_personagem_dropdown`). 1ª tentativa
+pôs o número ANTES do nome (`f"Slot {slot}: {power_atual} {nome}"`) -
+corrigida na hora ("valor era p ser igual antes Slot N: <Nome> (Power
+<Power Atual>)") pro formato de sempre, número DEPOIS do nome entre
+parênteses: `f"Slot {slot}: {prefixo_soulmate}{nome} (Power {power_atual})"`.
+
+**Fortalecer virou dropdown, não mais 2 botões.** O par "💪 Fortalecer" (1
+patamar por clique) + "⚡ Fortalecer ao Máximo" (gasta o saldo todo, da
+leva anterior no mesmo dia) foi substituído por UM botão que abre um
+dropdown "até qual patamar ir", com custo TOTAL acumulado por opção e
+confirmação antes de gastar - exatamente o padrão já usado por "⬆️ Upar
+Nível"/Loja/Construção (`_ViewEscolherAlvo`). A 1ª opção do dropdown É o
+antigo comportamento de 1 clique; a ÚLTIMA é "gastar tudo que dá pra esse
+slot" - um único fluxo cobre os 2 extremos antigos e tudo no meio, sem
+precisar de 2 botões.
+
+`_ViewEscolherAlvo` **generalizado, não duplicado.** Fortalecimento não é
+um domínio de "incrementos de 1 unidade" como Nível/Afinidade/Upgrade de
+Construção (que `_ViewEscolherAlvo` já assumia, com `range(valor_atual+1,
+valor_maximo+1)` e rótulo fixo `f"{rotulo} {alvo}"`) - são 14 patamares
+FIXOS, saltos de 50 em 50, cada um com custo próprio. Em vez de criar uma
+classe paralela duplicando toda a lógica de custo acumulado/confirmação/
+preservação do embed original durante o passo de confirmação (já testada
+em produção pelos outros 4 usos), `_ViewEscolherAlvo` ganhou 2 parâmetros
+NOVOS e opcionais:
+- `rotulo_opcao_fn(alvo)` - troca o rótulo padrão da opção por um
+  customizado (Fortalecimento usa `f"Fortalecer até {hi}"`, mostrando o
+  Power-alvo em vez do índice cru do patamar).
+- `unidade_degrau` (padrão `"nível"`) - troca a palavra usada pro "passo"
+  na descrição/confirmação (Fortalecimento usa `"patamar"`).
+
+Os 4 callers antigos (Upar Nível, Aumentar Afinidade, Loja - Treinamento
+Global/Potencial da Coleção/Upgrade de rolls/claims/itens, Construção)
+continuam passando só os parâmetros de sempre - o comportamento deles não
+mudou uma linha, os 2 novos parâmetros são puramente aditivos.
+
+`personagens_favoritas.fortalecer` (1 patamar) e `fortalecer_em_massa`
+(gasta tudo, da leva anterior) foram REMOVIDOS - sem nenhum uso fora do
+antigo par de botões que também foi removido. Substituídos por
+`custo_fortalecer_ate(indice_proximo, indice_alvo)` (soma pura, sem tocar
+no banco - usada pra montar as opções do dropdown) e `fortalecer_ate(
+guild_id, user_id, slot, indice_alvo)` (compra tudo do próximo patamar até
+`indice_alvo` inclusive, tudo-ou-nada: se o saldo não cobrir o custo TOTAL
+escolhido, falha sem comprar nada - diferente do antigo "gasta o quanto
+der", aqui o jogador já escolheu o alvo exato no dropdown antes de
+confirmar, então não faz sentido parar no meio de uma compra que ele
+mesmo pediu).
+
+Nenhuma mudança de schema. Validado só por leitura de código (sem clique
+real no Discord) - ver `docs/TODO.md`.
+
+## Cidade (ordem de texto) + Party lenta ao filtrar por role (2026-09-06)
+
+**Cidade** - troca pura de ordem em `_embed_cidade`, sem mudança de dado:
+o texto "Desde sua última visita" mostrava WiShards/XP/Soulstone, virou
+WiShards/Soulstone/XP de Progressão (pedido do usuário: "inverte soulstone
+com xp no inicio").
+
+**Party lenta ("apos colocar a role, demora um pouco p aparecer as
+personagens daquela role, tem como melhorar?").** Achado em `_abrir_
+adicionar`/`prosseguir`: filtrar as candidatas por categoria chamava
+`torre.categoria_personagem(p)` (que por sua vez chama `db.categoria_
+combate_da_classe(classe)`, uma consulta SQLite própria) **por
+personagem candidata**, sem nenhum cache - uma coleção com muitas
+personagens da MESMA classe repetia a consulta idêntica centenas de vezes.
+É exatamente o mesmo padrão "44 Guerreiro = 44 conexões SQLite idênticas"
+que `torre.power_personagem`/`db.info_classes_em_lote` já existem
+especificamente pra evitar (achado originalmente em `cidade._workforce_
+por_funcao`, 2026-09-01, "2,7s pra ~1.100 personagens") - só que aqui,
+nessa função específica, ninguém tinha usado esse cache ainda. Por cima
+disso, `ordenar_por_power` (chamada logo depois) e a montagem da descrição
+do dropdown (`_descricao_personagem_dropdown`) cada uma abria sua PRÓPRIA
+`torre._contexto_lote` de novo - 3 idas ao banco fazendo, na prática, o
+trabalho de 1.
+
+**Correção:** `torre.ordenar_por_power` ganhou um parâmetro opcional
+`contexto_lote=None` - se não vier, continua buscando sozinha (nenhum dos
+outros 5 callers no projeto precisou mudar); se vier, reaproveita o que já
+foi carregado. `prosseguir` agora busca UM `_contexto_lote` no topo e
+reaproveita nos 3 passos: filtra usando `contexto_lote[2]` (o cache de
+classe -> categoria, já em lote) em vez de `categoria_personagem` por
+personagem, passa o mesmo contexto pra `ordenar_por_power`, e pra
+`_descricao_personagem_dropdown` na montagem final do select. Resultado:
+1 consulta em lote no lugar de 3 (uma delas antes sendo, na real, N
+consultas - N = quantidade de candidatas).
+
+Nenhuma mudança de schema/comportamento visível além da velocidade (mesmo
+filtro/ordenação/descrição de sempre, só bem mais rápido). Validado só por
+leitura de código (sem medição real de tempo antes/depois) - ver
+`docs/TODO.md`.
 
 ## Pendências
 

@@ -58,7 +58,7 @@ def formatar_loja(raridade, personagens):
     if not personagens:
         return f"Nenhuma personagem {_ESTRELAS[raridade]} livre nesse servidor agora (será que já foi tudo comprado/reivindicado?)."
     linhas = [f"`#{p['id']}` {p['nome']}" for p in personagens]
-    return f"{_ESTRELAS[raridade]} custam {preco} WiShards cada - use `/loja comprar <#id>`:\n" + "\n".join(linhas)
+    return f"{_ESTRELAS[raridade]} custam {db.fmt_numero(preco)} WiShards cada - use `/loja comprar <#id>`:\n" + "\n".join(linhas)
 
 
 def parse_ids_personagens(texto):
@@ -105,7 +105,7 @@ def formatar_proposta(proposta):
             p = db.personagem_por_id(pid)
             partes.append(p["nome"] if p else f"#{pid}")
         if wishards:
-            partes.append(f"{wishards} WiShards")
+            partes.append(f"{db.fmt_numero(wishards)} WiShards")
         return ", ".join(partes) if partes else "nada"
 
     return (

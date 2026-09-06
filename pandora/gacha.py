@@ -177,7 +177,14 @@ def _sortear_um(guild_id, user_id, generos, permitir_nsfw, chance_wish_roll, rar
     `rolar_varios`, que consome o LOTE inteiro de uma vez, não um por um).
     `raridade_minima` (Guaranteed Roll) PULA o wish-roll - uma garantia paga
     de verdade não deveria virar uma personagem da wishlist de raridade
-    baixa só por sorte."""
+    baixa só por sorte.
+
+    🔥 Fonte por baixo virou `colecao_favoritas` (2026-09-03, fusão
+    Wishlist+Favoritos - "vamos unir tudo em Wishlist... vc ta mantendo o
+    nome das funcoes relacionadas a essa uniao como wishlist?") - mesmo
+    mecanismo de bias de antes, `db.wishlist_disponiveis_no_guild` (nome
+    da função preservado, só a tabela por baixo mudou), mesmo filtro
+    "ainda sem dono nesse servidor"."""
     if raridade_minima is None and random.random() < chance_wish_roll:
         disponiveis = db.wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw)
         if disponiveis:
@@ -269,6 +276,19 @@ def _limite_rolls_atual(guild_id, user_id, config=None):
     # os 2) - bônus SEPARADO do upgrade pago acima, mas soma junto.
     bonus_rolls, _bonus_claims = db.bonus_permanente_total(guild_id, user_id)
     return config["rolls_por_ciclo"] + db.nivel_upgrade_rolls(guild_id, user_id) * db.BONUS_ROLLS_POR_NIVEL + bonus_rolls
+
+
+def _limite_claims_atual(guild_id, user_id, config=None):
+    """Quantos claims o servidor + upgrade permanente da pessoa somam
+    nesse ciclo - espelha `_limite_rolls_atual` (mesmo motivo: extraído
+    pra nunca duplicar essa conta em 2 lugares). 2026-09-04, pedido do
+    usuário: "A ideia é consumir todos os claim q tem disponivel" - usado
+    pela Auto-coleta (`pandora.auto_colecionador.AutoColecionadorUsuarios`)
+    pra saber quantos claims reivindicar automaticamente por ciclo, em vez
+    do "sempre só 1" de antes."""
+    config = config or db.obter_configuracao_colecao(guild_id)
+    _bonus_rolls, bonus_claims = db.bonus_permanente_total(guild_id, user_id)
+    return config["claims_por_ciclo"] + db.nivel_upgrade_claims(guild_id, user_id) * db.BONUS_CLAIMS_POR_NIVEL + bonus_claims
 
 
 def rolar_varios(guild_id, user_id, comando, quantidade=1):
@@ -405,13 +425,13 @@ def montar_embed(resultado):
         # aparece nos 2 ramos onde `is_soulmate` é True.
         if tipo == "reencontro_copia":
             nome_campo = "✨ Cópia da sua Soulmate!"
-            valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{resultado['recompensa']} WiShards · +{resultado['soulstone_ganho']} Soulstone"
+            valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{db.fmt_numero(resultado['recompensa'])} WiShards · +{db.fmt_numero(resultado['soulstone_ganho'])} Soulstone"
         elif tipo == "reencontro_soulmate":
             nome_campo = "💞 Virou sua Soulmate!"
-            valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{resultado['recompensa']} WiShards"
+            valor_campo = f"Afinidade {resultado['afinidade']} (máxima) · +{db.fmt_numero(resultado['recompensa'])} WiShards"
         else:
             nome_campo = "🔁 Reencontro!"
-            valor_campo = f"Afinidade {resultado['afinidade_anterior']} → {resultado['afinidade']} · +{resultado['recompensa']} WiShards"
+            valor_campo = f"Afinidade {resultado['afinidade_anterior']} → {resultado['afinidade']} · +{db.fmt_numero(resultado['recompensa'])} WiShards"
         embed.add_field(name=nome_campo, value=valor_campo, inline=False)
         return embed
     if tipo == "terceiro":
@@ -439,7 +459,7 @@ def montar_embed(resultado):
             embed.set_thumbnail(url=resultado["imagem_url"])
         embed.add_field(
             name="🎁 Já tem dono",
-            value=f"Pertence a <@{resultado['dono_id']}>, que ganhou {resultado['recompensa_dono']} WiShards.",
+            value=f"Pertence a <@{resultado['dono_id']}>, que ganhou {db.fmt_numero(resultado['recompensa_dono'])} WiShards.",
             inline=False,
         )
         return embed
@@ -476,7 +496,11 @@ async def revelar_classe(personagem):
         # em `colecao_classes`, fonte ÚNICA de verdade.
         categoria_combate = await asyncio.to_thread(db.categoria_combate_da_classe, personagem["classe"])
         return personagem.get("classe_exibicao") or personagem["classe"], categoria_combate
-    classes = await asyncio.to_thread(db.classes_existentes)
+    # 🔥 `classes_mais_populares` em vez de `classes_existentes` (2026-09-03)
+    # - a lista INTEIRA (sem teto) inflava o custo de token de TODA
+    # classificação nova, um dos motivos do limite diário da Groq esgotar
+    # rápido (ver `db.classes_mais_populares` pro raciocínio completo).
+    classes = await asyncio.to_thread(db.classes_mais_populares)
     resultado = await asyncio.to_thread(
         gaia_webhook.pedir_classe_personagem,
         personagem["nome"], personagem.get("descricao"), personagem.get("serie"),
@@ -508,7 +532,7 @@ def _embed_confirmacao_claim(user, personagem, recompensa, novo_saldo, classe, c
         color=_CORES_RARIDADE.get(personagem["raridade"], 0x2ECC71),
     )
     embed.add_field(name="Raridade", value=_ESTRELAS.get(personagem["raridade"], "?"), inline=True)
-    embed.add_field(name="WiShards", value=f"+{recompensa} (saldo: {novo_saldo})", inline=True)
+    embed.add_field(name="WiShards", value=f"+{db.fmt_numero(recompensa)} (saldo: {db.fmt_numero(novo_saldo)})", inline=True)
     if classe:
         sufixo = f" ({categoria_combate})" if categoria_combate else ""
         embed.add_field(name="Classe", value=f"{classe}{sufixo}", inline=True)
@@ -657,14 +681,29 @@ async def comprar_com_revelacao(guild_id, personagem_id, user):
     comprar_personagem` nunca chamava `revelar_classe` (mesmo gap já
     achado no Merge antes, nunca corrigido pra Loja/navegador de série)
     - uma personagem NUNCA reivindicada em NENHUM servidor podia sair
-    comprada sem classe pra sempre. Devolve `(ok, mensagem)` - MESMO
-    formato de `db.comprar_personagem`, quem chama não precisa saber que
-    teve um passo a mais."""
+    comprada sem classe pra sempre. Devolve `(ok, mensagem, tem_classe)` -
+    `tem_classe` é `None` quando `ok=False` (a compra nem aconteceu), e
+    True/False quando `ok=True` (se a classificação disparada aqui deu
+    certo - `revelar_classe` pode falhar silenciosamente, ex.: cota diária
+    de tokens da Groq esgotada, ver CHANGELOG "limite diário de tokens da
+    Groq esgotando em ~23 classificações").
+
+    🔥 3º valor de retorno (2026-09-05, achado do usuário: "quando estou
+    dentro das coleções, e mando comprar tudo, as personagens compradas
+    estão vindo sem classe") - antes disso, uma falha de classificação no
+    meio de um "Comprar Tudo" (bem provável numa série grande - a cota da
+    Groq só aguenta ~23 classificações reais por dia) ficava 100%
+    silenciosa: a compra em si sempre tinha sucesso (`ok=True`), então
+    ninguém percebia que a personagem ficou sem classe até auditar depois.
+    Quem chama agora consegue avisar o jogador na hora e apontar pro
+    `/pandora_admin validar_classes` (já existia, cobre exatamente esse caso
+    - `classe IS NULL` sem exigir `classe_falhou=1`) como retentativa."""
     ok, mensagem = await asyncio.to_thread(db.comprar_personagem, guild_id, user.id, personagem_id)
-    if ok:
-        personagem = await asyncio.to_thread(db.personagem_por_id, personagem_id)
-        await revelar_classe(personagem)
-    return ok, mensagem
+    if not ok:
+        return ok, mensagem, None
+    personagem = await asyncio.to_thread(db.personagem_por_id, personagem_id)
+    await revelar_classe(personagem)
+    return ok, mensagem, bool(personagem.get("classe"))
 
 
 def regra_prova_soulmate(raridade):
@@ -950,7 +989,7 @@ async def processar_reacao_claim(client, payload):
     silenciosamente qualquer coisa que não seja exatamente o emoji de claim
     desse card específico (evita reação aleatória virar claim sem querer).
 
-    🔥 SÓ registrado no papel "completo" (2026-08-30, achado do usuário:
+    🔥 SÓ registrado no papel "principal" (2026-08-30, achado do usuário:
     "ambas os bots respondem, tinha q ser so 1") - a suposição antiga era
     de que cada instância só recebia evento das PRÓPRIAS mensagens, mas o
     Discord entrega `on_raw_reaction_add` pra QUALQUER bot conectado ao

@@ -27,12 +27,7 @@ import discord
 from discord.ext import tasks
 
 from pandora import auto_colecionador, conquistas, consulta, db, gacha, itens, torre
-
-# 🔥 Sem observação de horário de verão no Brasil desde 2019 (Lei/Decreto
-# federal) - offset fixo é CORRETO, não uma aproximação; evita depender do
-# pacote `tzdata` (não vem por padrão no Python do Windows, ver teste desta
-# sessão) só pra um fuso que nunca muda.
-FUSO_BRASILIA = timezone(timedelta(hours=-3))
+from pandora.config import FUSO_BRASILIA  # 2026-09-03, movido pra config.py - compartilhado com a Recompensa Diária
 
 CATEGORIAS = ("DPS", "Tank", "Support")
 HORARIOS_APARICAO = (10, 14, 18, 22)  # Seção 2, horário de Brasília
@@ -253,7 +248,7 @@ def escolher_melhor_personagem(guild_id, user_id, categorias_permitidas):
     colecao = db.colecao_do_usuario(guild_id, user_id)
     if not colecao:
         return None, None, None
-    niveis, bonus_global, cache_classe, bonus_series = torre._contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = torre._contexto_lote(guild_id, user_id)
     melhor = None
     melhor_cp = -1.0
     melhor_categoria = None
@@ -264,7 +259,7 @@ def escolher_melhor_personagem(guild_id, user_id, categorias_permitidas):
         nivel = niveis.get(personagem["id"], 1)
         cp, _nivel, _categoria = torre.power_personagem(
             personagem, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
-            bonus_series=bonus_series,
+            bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
         )
         if cp > melhor_cp:
             melhor, melhor_cp, melhor_categoria = personagem, cp, categoria
@@ -325,7 +320,7 @@ def alternar_categoria(evento_id, guild_id, user_id, categoria):
     db.worldboss_definir_participante(
         evento_id, user_id, personagem["id"], categoria_escolhida, list(categorias_atuais), cp, origem="manual",
     )
-    return True, f"Selecionada: {categoria_escolhida} **{personagem['nome']}** ({cp:.0f} CP).", personagem, cp
+    return True, f"Selecionada: {categoria_escolhida} **{personagem['nome']}** ({db.fmt_numero(cp)} CP).", personagem, cp
 
 
 def _entrar_bots(evento_id, participantes_humanos, media_cp):
@@ -637,8 +632,10 @@ def executar_turno(evento):
 # pelo hub (`paineis.ViewWorldBossHub`, consulta sob demanda).
 # ==========================================================================
 
-def _fmt(valor):
-    return f"{valor:,.0f}".replace(",", ".")
+# 🔥 Alias pra `db.fmt_numero` (2026-09-03, pedido do usuário: "separa por
+# . as casas de todos os numeros") - era uma implementação PRÓPRIA idêntica
+# em espírito à de `paineis.py` (mesma duplicação, unificada agora).
+_fmt = db.fmt_numero
 
 
 def _campo_dificuldade(evento):
@@ -713,7 +710,7 @@ def embed_inicio_combate(evento, resultado_time):
     inscrições fecham e o combate começa de verdade."""
     dados = CATALOGO_BOSSES[evento["boss_tipo"]]
     embed = discord.Embed(title=f"⚔️ TIME DO SERVIDOR vs. {dados['nome']}", color=0x2ECC71)
-    embed.add_field(name="Participantes", value=str(resultado_time["participantes"]), inline=False)
+    embed.add_field(name="Participantes", value=db.fmt_numero(resultado_time["participantes"]), inline=False)
     embed.add_field(
         name="⚔️ DPS", value=f"{resultado_time['qtd']['DPS']} · CP {_fmt(resultado_time['soma_cp']['DPS'])} · Dano {_fmt(resultado_time['dano'])}/turno",
         inline=False,
@@ -751,7 +748,7 @@ def embed_turno(evento, linhas, terminou, resultado):
 
 
 # ==========================================================================
-# Scheduler (discord.ext.tasks) - só roda na instância "completo" (mesmo
+# Scheduler (discord.ext.tasks) - só roda na instância "principal" (mesmo
 # critério de `auto_colecionador.AutoColecionadorUsuarios`), 3 checagens
 # independentes por tick de 30s, cada uma 100% derivada do banco.
 # ==========================================================================
@@ -936,8 +933,8 @@ class SchedulerWorldBoss:
             await asyncio.to_thread(db.creditar_xp_progressao, guild_id, user_id, RECOMPENSA_XP_VITORIA)
             await asyncio.to_thread(db.creditar_soulstone, guild_id, user_id, RECOMPENSA_SOULSTONE_VITORIA, "worldboss_vitoria")
             linhas.append(
-                f"💎 +{RECOMPENSA_WISHARDS_VITORIA} WiShards · 📈 +{RECOMPENSA_XP_VITORIA} XP · "
-                f"💠 +{RECOMPENSA_SOULSTONE_VITORIA} Soulstone",
+                f"💎 +{db.fmt_numero(RECOMPENSA_WISHARDS_VITORIA)} WiShards · 📈 +{db.fmt_numero(RECOMPENSA_XP_VITORIA)} XP · "
+                f"💠 +{db.fmt_numero(RECOMPENSA_SOULSTONE_VITORIA)} Soulstone",
             )
             item_raro = await asyncio.to_thread(itens.sortear_drop_raro)
             if item_raro:

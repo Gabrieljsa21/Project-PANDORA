@@ -34,11 +34,20 @@ def power_base(popularidade):
 BONUS_POWER_POR_NIVEL = 50
 
 
-def power_final(popularidade, nivel, afinidade, is_soulmate):
+def power_final(popularidade, nivel, afinidade, is_soulmate, power_base_override=None):
     """Fórmula fechada (Seção 6): `(Power Base + Bônus de Nível) ×
     Multiplicador` - multiplicador é 2,0 se Soulmate, senão `1,0 +
-    (afinidade-1)×0,10` (Afinidade 1 = 1,0×, Afinidade 10 = 1,9×)."""
-    base = power_base(popularidade) + (nivel - 1) * BONUS_POWER_POR_NIVEL
+    (afinidade-1)×0,10` (Afinidade 1 = 1,0×, Afinidade 10 = 1,9×).
+
+    🔥 `power_base_override` (2026-09-03, `pandora.personagens_favoritas`) -
+    Personagem Favorita substitui só o Power Base NATURAL (`power_base(
+    popularidade)`) pelo Power Base efetivo do slot (300-1000 por
+    Fortalecimento, além disso por Ascensão) - o resto da fórmula (bônus de
+    nível fixo, multiplicador de Afinidade/Soulmate) continua IDÊNTICO,
+    pedido explícito do usuário: "não alterar a fórmula original... Nível/
+    Afinidade/Soulmate continuam participando normalmente"."""
+    base_natural = power_base_override if power_base_override is not None else power_base(popularidade)
+    base = base_natural + (nivel - 1) * BONUS_POWER_POR_NIVEL
     multiplicador = 2.0 if is_soulmate else 1.0 + (afinidade - 1) * 0.10
     return base * multiplicador
 
@@ -131,7 +140,7 @@ def categoria_personagem(personagem):
     return db.categoria_combate_da_classe(personagem["classe"]) if personagem.get("classe") else None
 
 
-def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=None, cache_bonus_classe=None, bonus_series=None):
+def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=None, cache_bonus_classe=None, bonus_series=None, favoritas_ocupantes=None):
     """CP de UMA personagem, no vínculo (guild+user) - núcleo reaproveitado
     pela Party inteira (`_calcular_contexto`) e por qualquer UI que precise
     mostrar o CP avulso de uma personagem (Party/dropdowns, 2026-08-30,
@@ -160,11 +169,32 @@ def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=Non
     abrir conexões SQLite novas pra cada personagem (`db.conexao()` não
     faz pool - uma coleção de centenas virava mil+ conexões, estourando o
     teto de 3s do Discord). Chamada avulsa (card de 1 personagem) continua
-    funcionando igual, sem passar nada disso - cai no fallback de sempre."""
+    funcionando igual, sem passar nada disso - cai no fallback de sempre.
+
+    🔥 `favoritas_ocupantes` (2026-09-03, `pandora.personagens_favoritas`,
+    opcional) - `{personagem_id: {"fortalecimento_bitmask", "nivel_ascensao"}}`
+    pré-carregado (ver `_contexto_lote`), mesmo padrão de `bonus_series` -
+    se essa personagem ocupa um slot de Personagem Favorita, o Power Base
+    NATURAL é substituído pelo efetivo do slot (`power_base_override` em
+    `power_final`) - import LOCAL (não no topo do arquivo) porque
+    `personagens_favoritas.py` importa `torre` (`power_base`), import no
+    topo dos dois viraria ciclo."""
     if nivel is None:
         nivel = db.nivel_personagem(guild_id, user_id, personagem["id"])
+    power_base_override = None
+    if favoritas_ocupantes and personagem["id"] in favoritas_ocupantes:
+        from pandora import personagens_favoritas
+        ocupante = favoritas_ocupantes[personagem["id"]]
+        elegivel = personagens_favoritas.elegivel_ascensao(
+            personagem, nivel,
+            personagens_favoritas._estado_fortalecimento(personagem["popularidade"], ocupante["fortalecimento_bitmask"])[0],
+        )
+        power_base_override = personagens_favoritas.power_efetivo(
+            personagem["popularidade"], ocupante["fortalecimento_bitmask"], ocupante["nivel_ascensao"], elegivel,
+        )
     power = power_final(
         personagem["popularidade"], nivel, personagem.get("afinidade", 1), bool(personagem.get("is_soulmate")),
+        power_base_override=power_base_override,
     )
     if bonus_global is None:
         bonus_global = db.bonus_cp_global(guild_id, user_id)
@@ -219,27 +249,42 @@ def _contexto_lote(guild_id, user_id):
     dominava o tempo de `cidade._workforce_por_funcao`). 🔥 4º item,
     `bonus_series` (2026-09-02) - snapshot de bônus por Série Favorita
     (`db.bonus_series_favoritas`), mesma lógica: 1 leitura barata aqui em
-    vez de `power_personagem` consultar por personagem."""
+    vez de `power_personagem` consultar por personagem. 🔥 5º item,
+    `favoritas_ocupantes` (2026-09-03) - mesma lógica, pra Personagem
+    Favorita (`db.personagens_favoritas_ocupantes`)."""
     return (
         db.nivel_em_lote(guild_id, user_id), db.bonus_cp_global(guild_id, user_id),
         dict(db.info_classes_em_lote(guild_id, user_id)), db.bonus_series_favoritas(guild_id, user_id),
+        db.personagens_favoritas_ocupantes(guild_id, user_id),
     )
 
 
-def ordenar_por_power(personagens, guild_id, user_id):
+def ordenar_por_power(personagens, guild_id, user_id, contexto_lote=None):
     """Ordena do MAIOR pro menor CP (2026-08-30, pedido do usuário: "Todo
     dropdwon q listar waifu, sempre ordene pelas com maior CP/
     popularidade") - só faz sentido pra personagens JÁ POSSUÍDAS (usa
     `power_personagem`, que depende de Nível/Afinidade do vínculo); pra
     lista de personagens NÃO possuídas (loja/wishlist), usar `consulta.
-    ordenar_por_popularidade` em vez desta."""
-    niveis, bonus_global, cache_classe, bonus_series = _contexto_lote(guild_id, user_id)
+    ordenar_por_popularidade` em vez desta.
+
+    🔥 `contexto_lote` opcional (2026-09-06, achado do usuário: "na hora de
+    adicionar membros a party, apos colocar a role, demora um pouco p
+    aparecer as personagens daquela role") - quem já filtrou/vai descrever
+    a MESMA lista por perto (ex.: `paineis._abrir_adicionar`, que também
+    filtra por categoria e monta a descrição do dropdown) pode pré-carregar
+    1x e passar aqui, em vez desta função abrir sua PRÓPRIA consulta
+    `_contexto_lote` de novo - reduz de 3 idas ao banco (filtro + esta
+    função + descrição) pra 1 só. `None` (padrão) mantém o comportamento de
+    sempre, busca sozinha."""
+    if contexto_lote is None:
+        contexto_lote = _contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = contexto_lote
 
     def _power(p):
         nivel = niveis.get(p["id"], 1)
         return power_personagem(
             p, guild_id, user_id, nivel=nivel, bonus_global=bonus_global, cache_bonus_classe=cache_classe,
-            bonus_series=bonus_series,
+            bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
         )[0]
 
     return sorted(personagens, key=_power, reverse=True)
@@ -426,12 +471,12 @@ def montar_auto_party(guild_id, user_id):
     restricao = restricao_andar(andar)
     tamanho = db.MAX_POSICOES_EQUIPE
 
-    niveis, bonus_global, cache_classe, bonus_series = _contexto_lote(guild_id, user_id)
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = _contexto_lote(guild_id, user_id)
     pool = []
     for p in colecao:
         power, _nivel, categoria = power_personagem(
             p, guild_id, user_id, nivel=niveis.get(p["id"], 1), bonus_global=bonus_global, cache_bonus_classe=cache_classe,
-            bonus_series=bonus_series,
+            bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
         )
         pool.append({"id": p["id"], "power": power, "categoria_combate": categoria})
 
@@ -492,6 +537,123 @@ def tentar_andar(guild_id, user_id):
         contexto["novo_andar"] = novo_andar
         contexto["xp_ganho"] = xp
     return True, None, contexto
+
+
+_LIMITE_ANDARES_SUBIR_MAX = 2000  # segurança contra loop infinito - inatingível numa conta real (custo cresce 6%/andar)
+
+
+def subir_max(guild_id, user_id):
+    """"Subir Max" (2026-09-04, pedido do usuário: "usado Subir torre ate
+    o máximo possível mas seguindo as regras por andar e trocando de time
+    p considerar ela") - sobe andar por andar em loop até perder, escolhendo
+    pra CADA andar a mesma composição de maior CP que `montar_auto_party`
+    já escolheria pro andar atual (respeitando a restrição de categoria
+    dele, `RESTRICOES_ANDAR`).
+
+    Como nenhuma personagem sobe de Nível/Afinidade durante o loop, a
+    MELHOR composição pra cada um dos 6 padrões de restrição é a MESMA
+    em todo andar que usa aquele padrão - pré-calculada 1x fora do loop
+    (`composicoes`), nunca recalculada andar a andar. A Party só é
+    REGRAVADA no banco quando a composição realmente muda de um andar pro
+    próximo (a restrição cicla de 6 em 6, então a maioria dos andares
+    reaproveita a mesma Party sem escrita nenhuma) - "trocando de time p
+    considerar ela" é EXATAMENTE essa troca, automática, sem precisar
+    clicar "Auto-Party" a cada mudança de restrição na mão.
+
+    🗝️ Chave da Torre - mesma regra de `tentar_andar` (consumida na
+    tentativa, vença ou perca), só que aqui só pode valer pro 1º andar do
+    loop (não dá pra "ignorar restrição" o tempo todo) - usa a composição
+    SEM restrição nenhuma (maior CP possível, `composicoes[None]`) só
+    nessa 1ª tentativa, mesmo que o andar real peça outra coisa.
+
+    Devolve um dict-resumo (nunca `None`) com `andares_subidos`,
+    `andar_inicial`, `andar_final`, `recompensa_total`, `xp_total`,
+    `motivo_parada` (`"sem_colecao"`, `"restricao_impossivel"`,
+    `"power_insuficiente"` ou `"limite_seguranca"`) e `restricao_travada`
+    (descrição da restrição que travou o avanço, `None` se foi por power).
+    Nunca lança erro - Party vazia/coleção vazia só zera `andares_subidos`."""
+    colecao = db.colecao_do_usuario(guild_id, user_id)
+    andar_inicial = db.andar_atual_torre(guild_id, user_id)
+    if not colecao:
+        return {
+            "andares_subidos": 0, "andar_inicial": andar_inicial, "andar_final": andar_inicial,
+            "recompensa_total": 0, "xp_total": 0, "motivo_parada": "sem_colecao", "restricao_travada": None,
+        }
+
+    tamanho = db.MAX_POSICOES_EQUIPE
+    niveis, bonus_global, cache_classe, bonus_series, favoritas_ocupantes = _contexto_lote(guild_id, user_id)
+    pool = []
+    for p in colecao:
+        power, _nivel, categoria = power_personagem(
+            p, guild_id, user_id, nivel=niveis.get(p["id"], 1), bonus_global=bonus_global,
+            cache_bonus_classe=cache_classe, bonus_series=bonus_series, favoritas_ocupantes=favoritas_ocupantes,
+        )
+        pool.append({"id": p["id"], "power": power, "categoria_combate": categoria})
+
+    # 🔥 1 composição por padrão de RESTRIÇÃO (nunca por andar) - `None`
+    # (já incluso em `RESTRICOES_ANDAR`) é a composição "sem restrição",
+    # usada pela Chave.
+    composicoes = {}
+    for restricao in set(RESTRICOES_ANDAR):
+        selecionados = _selecionar_auto_party(pool, restricao, tamanho)
+        power_total, categorias = calcular_power_party(selecionados, guild_id, user_id)
+        composicoes[restricao] = {
+            "ids": [c["id"] for c in selecionados],
+            "power_total": power_total,
+            "restricao_ok": checar_restricao(restricao, categorias),
+        }
+
+    chave_ativa = db.chave_torre_ativa(guild_id, user_id)
+    equipe_atual_ids = {p["id"] for p in db.obter_equipe(guild_id, user_id, "party").values()}
+    andar = andar_inicial
+    recompensa_total = 0
+    xp_total = 0
+    motivo_parada = "power_insuficiente"
+    restricao_travada = None
+
+    for indice in range(_LIMITE_ANDARES_SUBIR_MAX):
+        restricao = restricao_andar(andar)
+        alvo = power_alvo_andar(andar)
+        usar_chave_aqui = chave_ativa and indice == 0
+        comp = composicoes[None] if usar_chave_aqui else composicoes[restricao]
+        if not usar_chave_aqui and not comp["restricao_ok"]:
+            motivo_parada = "restricao_impossivel"
+            restricao_travada = descricao_restricao(restricao)
+            break
+        if comp["power_total"] < alvo:
+            motivo_parada = "power_insuficiente"
+            break
+        if set(comp["ids"]) != equipe_atual_ids:
+            db.limpar_equipe(guild_id, user_id, "party")
+            for posicao, personagem_id in enumerate(comp["ids"], start=1):
+                db.definir_posicao_equipe(guild_id, user_id, "party", posicao, personagem_id)
+            equipe_atual_ids = set(comp["ids"])
+        if usar_chave_aqui:
+            db.definir_chave_torre_ativa(guild_id, user_id, False)
+        recompensa = recompensa_andar(andar)
+        db.creditar_wishards(guild_id, user_id, recompensa, "torre_andar", f"Andar {andar}", str(andar))
+        xp = 10 * andar * (5 if andar % 50 == 0 else 1)
+        db.creditar_xp_progressao(guild_id, user_id, xp)
+        db.registrar_vitoria_torre_personagens(guild_id, user_id, comp["ids"])
+        andar = db.avancar_andar_torre(guild_id, user_id)
+        recompensa_total += recompensa
+        xp_total += xp
+    else:
+        motivo_parada = "limite_seguranca"
+
+    if chave_ativa and andar == andar_inicial:
+        # 🔥 Chave consumida mesmo perdendo o 1º andar (mesma regra de
+        # `tentar_andar` - "paga pelo direito de tentar, não pelo
+        # resultado") - se o loop já venceu pelo menos 1 andar, a Chave já
+        # foi consumida dentro do loop acima; só falta cobrir quem perdeu
+        # de cara e nunca entrou no bloco `usar_chave_aqui`.
+        db.definir_chave_torre_ativa(guild_id, user_id, False)
+
+    return {
+        "andares_subidos": andar - andar_inicial, "andar_inicial": andar_inicial, "andar_final": andar,
+        "recompensa_total": recompensa_total, "xp_total": xp_total,
+        "motivo_parada": motivo_parada, "restricao_travada": restricao_travada,
+    }
 
 
 def _investir_em_massa(guild_id, user_id, orcamento, nivel_maximo, obter_atual, custo_ate, subir_ate, colecao=None):

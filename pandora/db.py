@@ -16,7 +16,73 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from pandora.config import CAMINHO_BANCO, PASTA_DADOS
+from pandora.config import CAMINHO_BANCO, FUSO_BRASILIA, PASTA_DADOS
+
+
+_SUFIXOS_FIXOS = ("", "K", "M", "B", "T", "Q")
+
+
+def _rotulo_letras_abreviacao(indice):
+    """Rótulo de 2+ letras estilo "coluna de planilha" (A,B,...Z,AA,AB,...),
+    mas começando DIRETO em 2 letras (`indice` 0 -> "AA", 25 -> "AZ", 26 ->
+    "BA", ...) - `_sufixo_abreviado` já soma o deslocamento de 26 antes de
+    chamar isso, pra pular a faixa de 1 letra (A-Z) inteira. Bijetivo em
+    base 26 (nunca "estoura" - continua gerando AAA/AAB/... sozinho se um
+    número um dia for grande o bastante pra passar de "ZZ", sem precisar
+    de nenhum código novo)."""
+    indice += 1
+    letras = []
+    while indice > 0:
+        indice, resto = divmod(indice - 1, 26)
+        letras.append(chr(ord("A") + resto))
+    return "".join(reversed(letras))
+
+
+def _sufixo_abreviado(tier):
+    """`tier` 0 = sem sufixo, 1=K, 2=M, 3=B, 4=T, 5=Q, 6=AA, 7=AB, ..., 31=AZ,
+    32=BA, ... (2026-09-03, pedido do usuário: "K → M → B → T → Q → AA →
+    AB → AC... → AZ → BA → BB..., avançando um sufixo a cada ×1.000")."""
+    if tier < len(_SUFIXOS_FIXOS):
+        return _SUFIXOS_FIXOS[tier]
+    return _rotulo_letras_abreviacao(tier - len(_SUFIXOS_FIXOS) + 26)
+
+
+def fmt_numero(valor, casas_decimais=1):
+    """Formato abreviado ÚNICO pra todo número grande do PANDORA (2026-09-03,
+    pedido do usuário: "Altere a exibição global de números grandes do
+    PANDORA para um formato abreviado e consistente... centralize essa
+    lógica em uma única função de formatação para que Power/CP, WiShards,
+    Soulstones, XP, preços, produção e demais números... sigam exatamente o
+    mesmo padrão" - substitui o formato anterior de milhar com ponto,
+    `1.234.567`, usado só nesta mesma sessão antes). Sobe 1 tier a cada
+    ×1000 (`_sufixo_abreviado`); `casas_decimais` é o MÁXIMO de casas (1 por
+    padrão - "quero apenas 1 casa decimal", reduzido de 2) - zeros à
+    direita SEMPRE removidos (1,5M continua 1,5M; 2,0B -> 2B; 500,0 -> 500,
+    já que valores abaixo de 1000/tier 0 também passam pelo mesmo corte,
+    "e se for 0 pode desconsiderar"). Uma chamada com `casas_decimais`
+    menor continua funcionando igual - é só um teto mais apertado, nunca
+    força casas que não existem."""
+    negativo = valor < 0
+    valor = abs(valor)
+    tier = 0
+    while valor >= 1000:
+        valor /= 1000.0
+        tier += 1
+    # 🔥 Correção de borda (2026-09-03, achado testando 999999) - um valor
+    # tipo 999.999 (tier K) ARREDONDA pra 1000,00 na hora de exibir com
+    # `casas_decimais` casas, o que sairia "1000K" (4 dígitos antes do
+    # sufixo, quebra a promessa de número sempre CURTO da abreviação) -
+    # sobe mais 1 tier nesse caso (1000K -> 1M), padrão comum em qualquer
+    # abreviação de número (jogos/planilhas).
+    if round(valor, casas_decimais) >= 1000:
+        valor /= 1000.0
+        tier += 1
+    texto = f"{valor:.{casas_decimais}f}"
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    texto = texto.replace(".", ",") + _sufixo_abreviado(tier)
+    return f"-{texto}" if negativo else texto
+
 
 _SCHEMA = """
 -- Coleção de personagens (colecionador estilo Mudae, ver
@@ -520,6 +586,19 @@ CREATE TABLE IF NOT EXISTS colecao_inventario (
     PRIMARY KEY (guild_id, user_id, item)
 );
 
+-- 🔥 Contador VITALÍCIO de compras por item na Loja (2026-09-03, pedido do
+-- usuário: "Todos os itens da loja tem q aumentar o preço a medida q são
+-- compradas") - separado de `colecao_inventario.quantidade` de propósito:
+-- o inventário CAI quando o item é usado/consumido, mas o preço tem que
+-- continuar subindo mesmo depois de gasto - nunca decrementado.
+CREATE TABLE IF NOT EXISTS colecao_compras_item (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    item TEXT NOT NULL,
+    total INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, item)
+);
+
 -- 🛡️ Proteção (Seção 7) aplicada - permanente até o jogador remover (sem
 -- prazo definido na spec, "balanceável depois") - mesmo espírito de
 -- `colecao_favoritas`, mas voltada pra proteção contra a Batalha 5x5
@@ -630,6 +709,26 @@ CREATE TABLE IF NOT EXISTS colecao_series_favoritas_bonus (
     soulbond_completo INTEGER NOT NULL DEFAULT 0,
     atualizado_em TEXT NOT NULL,
     PRIMARY KEY (guild_id, user_id, serie)
+);
+
+-- Personagens Favoritas (2026-09-03, `pandora.personagens_favoritas`) -
+-- mesmo espírito de Série Favorita acima, só que a progressão (Fortalecimento/
+-- Ascensão) pertence ao SLOT, não à personagem que o ocupa - trocar de
+-- ocupante NUNCA reseta `fortalecimento_bitmask`/`nivel_ascensao` (pedido
+-- explícito do usuário). `fortalecimento_bitmask` guarda os 14 patamares de
+-- 300 a 1000 (50 em 50) como bits (bit N = patamar N comprado NESSE slot) -
+-- nunca uma lista de strings, ver `pandora.personagens_favoritas.
+-- PATAMARES_FORTALECIMENTO`. `nivel_ascensao` é um contador simples (sempre
+-- comprado em ordem, mesmo padrão de todo "nível de upgrade" já existente).
+CREATE TABLE IF NOT EXISTS colecao_personagens_favoritas (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    personagem_id INTEGER,
+    fortalecimento_bitmask INTEGER NOT NULL DEFAULT 0,
+    nivel_ascensao INTEGER NOT NULL DEFAULT 0,
+    trocado_em TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, slot)
 );
 """
 
@@ -762,6 +861,18 @@ def inicializar():
         # exibição (`consulta.linha_personagem`/`gacha`).
         if "classe_exibicao" not in colunas:
             conn.execute("ALTER TABLE colecao_personagens ADD COLUMN classe_exibicao TEXT")
+        # 🔥 `classe_falhou` (2026-09-03, pedido do usuário: "Aumenta o
+        # limite do pandora_admin validar_classes para 100, e coloca algo p
+        # as q derem erro n voltarem p fila, validamos elas depois") -
+        # `/pandora_admin validar_classes` reprocessava sempre as MESMAS
+        # primeiras N personagens (ordenado por `p.id`) quando a GAIA
+        # estava fora do ar - a fila nunca avançava. Esse flag marca quem
+        # falhou (`db.marcar_falha_classificacao`) pra sair da fila padrão
+        # (`personagens_possuidos_sem_classe` default já filtra
+        # `classe_falhou = 0`) sem perder o registro - `apenas_falhas=True`
+        # devolve exatamente essas pra uma revisão manual separada, depois.
+        if "classe_falhou" not in colunas:
+            conn.execute("ALTER TABLE colecao_personagens ADD COLUMN classe_falhou INTEGER NOT NULL DEFAULT 0")
         # 🔥 Prova de Soulmate (2026-08-29, ERIS_power_afinidade_soulmate_
         # niveis.md) - conteúdo gerado 1x pela GAIA na 1ª vez que a
         # personagem chega em Afinidade 10 (mesmo padrão de `classe`/
@@ -863,6 +974,11 @@ def inicializar():
         # pagos aqui (nível 0-5), mesmo espírito do upgrade de rolls/claims.
         if "nivel_upgrade_slots_serie_favorita" not in colunas_estado:
             conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN nivel_upgrade_slots_serie_favorita INTEGER NOT NULL DEFAULT 0")
+        # 🔥 Slots extras de Personagem Favorita (2026-09-03, `pandora.
+        # personagens_favoritas`) - mesmo espírito de Série Favorita acima,
+        # 5 slots base (sem custo, sem coluna) + até 20 pagos aqui.
+        if "nivel_upgrade_slots_personagem_favorita" not in colunas_estado:
+            conn.execute("ALTER TABLE colecao_estado_jogador ADD COLUMN nivel_upgrade_slots_personagem_favorita INTEGER NOT NULL DEFAULT 0")
         # 🔥 Auto-Defesa de Batalha (2026-09-02, pedido do usuário: "É
         # possivel deixar configurado p players tbm") - jogador liga essa
         # opção pra ser defendido automaticamente na hora (mesma lógica de
@@ -988,6 +1104,24 @@ def inicializar():
         for coluna_cidade in ("cp_bonus_militar_fixo", "cp_bonus_arcano_percentual", "cp_bonus_colecao_fixo"):
             if coluna_cidade not in colunas_cidade:
                 conn.execute(f"ALTER TABLE colecao_cidade_estado ADD COLUMN {coluna_cidade} REAL NOT NULL DEFAULT 0")
+
+        # 🔥 Fusão Wishlist -> Favoritos (2026-09-03, pedido do usuário:
+        # "tem Favoritos e Wishlist, Vamos unir tudo em Wishlist... melhor
+        # manter o favoritos e apenas renomea-lo para wishlist") - as 2
+        # tabelas sempre foram estruturalmente idênticas (`guild_id,
+        # user_id, personagem_id`), a diferença toda era regra de
+        # aplicação (JOIN/checagem de posse), não schema. Copia toda
+        # entrada de `colecao_wishlist` pra `colecao_favoritas` (`INSERT OR
+        # IGNORE` - idempotente, roda em TODO boot sem duplicar nem
+        # sobrescrever o que já foi migrado) - ninguém perde o que já
+        # tinha na wishlist antiga só porque o mecanismo mudou de nome.
+        # `colecao_wishlist` continua existindo (sem migração destrutiva,
+        # mesmo padrão de toda tabela aposentada neste projeto), só para
+        # de ser LIDA por qualquer código novo.
+        conn.execute(
+            "INSERT OR IGNORE INTO colecao_favoritas (guild_id, user_id, personagem_id) "
+            "SELECT guild_id, user_id, personagem_id FROM colecao_wishlist",
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1239,9 +1373,40 @@ def classes_existentes():
     `colecao_classes` (2026-08-30, fonte única depois do backfill de
     `inicializar()`) - antes lia `DISTINCT classe` direto de `colecao_
     personagens`, o que funcionava igual pra listar nomes, mas não dava
-    onde guardar a categoria_combate CANÔNICA de cada uma."""
+    onde guardar a categoria_combate CANÔNICA de cada uma.
+
+    🔥 Lista COMPLETA, sem teto - usada só pelos scripts de reclassificação
+    (auditoria/consolidação de taxonomia). O caminho quente de classificação
+    (`gacha.revelar_classe`) usa `classes_mais_populares` (abaixo), não esta -
+    ver comentário lá pro porquê."""
     with conexao() as conn:
         linhas = conn.execute("SELECT classe FROM colecao_classes ORDER BY classe").fetchall()
+        return [r["classe"] for r in linhas]
+
+
+def classes_mais_populares(limite=30):
+    """Como `classes_existentes`, mas só as `limite` MAIS USADAS (por
+    contagem de personagens no catálogo, não por servidor) - 2026-09-03,
+    achado do usuário investigando por que o limite DIÁRIO de tokens da
+    Groq esgotava rápido: `classes_existentes()` manda a lista INTEIRA (já
+    chegou a 45 itens antes de uma consolidação manual) sem nenhum teto de
+    tamanho no prompt da GAIA (`pandora.gaia_webhook.pedir_classe_
+    personagem` -> `core.agent.turno.classificar_personagem_colecao`) -
+    cada classificação nova pagava o custo de token da lista INTEIRA.
+    Cortar pras mais populares mantém a maior parte do valor prático de
+    reaproveitar classe existente (a distribuição de uso tende a ser bem
+    concentrada nas mais comuns) por uma fração do tamanho. Classes fora
+    do topo N ainda podem ser reaproveitadas por coincidência (a GAIA pode
+    devolver o mesmo nome de novo mesmo sem ver na lista), e duplicatas/
+    quase-sinônimos que escaparem disso são corrigíveis depois com os
+    mesmos scripts de reclassificação já usados antes (`reclassificar_
+    taxonomia_*.py`)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT classe, COUNT(*) AS total FROM colecao_personagens "
+            "WHERE classe IS NOT NULL GROUP BY classe ORDER BY total DESC LIMIT ?",
+            (limite,),
+        ).fetchall()
         return [r["classe"] for r in linhas]
 
 
@@ -1304,6 +1469,67 @@ def definir_classe_personagem(personagem_id, classe, categoria_combate=None, cla
             (classe, classe_exibicao or classe, personagem_id),
         )
     return categoria_combate
+
+
+def personagens_possuidos_sem_classe(limite=20, apenas_falhas=False):
+    """Personagens já reivindicadas (por alguém, em QUALQUER servidor) mas
+    ainda sem `classe` (2026-09-03, pedido do usuário: "Validar Classes, e
+    se todos personagens coletados tem" - achado ao investigar: o Merge
+    (`economia.executar_merge`) nunca chamava `gacha.revelar_classe`, então
+    uma personagem NUNCA reivindicada antes podia sair do Merge sem classe
+    pra sempre - corrigido em `paineis._ViewEscolherMergeAlvo._escolher`,
+    mas personagens que já passaram por esse gap antes do fix ficam sem
+    classe até alguém rodar isso). `DISTINCT` porque a mesma personagem
+    pode ter dono em vários servidores ao mesmo tempo (ownership é por
+    guild, classe é global) - contaria repetido sem isso. `limite=None`
+    devolve tudo (usado só por `contar_personagens_possuidos_sem_classe`).
+
+    🔥 `apenas_falhas` (2026-09-03, "coloca algo p as q derem erro n
+    voltarem p fila, validamos elas depois. Voce so tem q conseguir
+    diferenciar elas depois") - por padrão (`False`) a fila PULA quem já
+    falhou antes (`classe_falhou = 1`, marcado por
+    `marcar_falha_classificacao`), então a fila sempre AVANÇA pra
+    personagens nunca tentadas em vez de reprocessar as mesmas primeiras N
+    (por `p.id`) toda vez que a GAIA está fora do ar. `apenas_falhas=True`
+    inverte o filtro - devolve SÓ quem já falhou antes, pra uma revisão
+    manual separada quando for a hora."""
+    filtro_falha = "p.classe_falhou = 1" if apenas_falhas else "p.classe_falhou = 0"
+    sql = (
+        "SELECT DISTINCT p.id, p.nome, p.serie, p.genero, p.descricao "
+        "FROM colecao_personagens p "
+        "JOIN colecao_propriedade c ON c.personagem_id = p.id "
+        f"WHERE p.classe IS NULL AND {filtro_falha} ORDER BY p.id"
+    )
+    with conexao() as conn:
+        if limite is not None:
+            linhas = conn.execute(sql + " LIMIT ?", (limite,)).fetchall()
+        else:
+            linhas = conn.execute(sql).fetchall()
+        return [dict(r) for r in linhas]
+
+
+def contar_personagens_possuidos_sem_classe(apenas_falhas=False):
+    filtro_falha = "p.classe_falhou = 1" if apenas_falhas else "p.classe_falhou = 0"
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT COUNT(DISTINCT p.id) AS total FROM colecao_personagens p "
+            f"JOIN colecao_propriedade c ON c.personagem_id = p.id WHERE p.classe IS NULL AND {filtro_falha}",
+        ).fetchone()
+    return linha["total"]
+
+
+def marcar_falha_classificacao(personagem_id):
+    """Tira a personagem da fila PADRÃO de `/pandora_admin validar_classes`
+    sem perder o registro dela - só quem chama com `apenas_falhas=True`
+    volta a ver essa personagem (revisão manual separada, ver
+    `personagens_possuidos_sem_classe`). `AND classe IS NULL` defensivo -
+    nunca marca falha em quem já foi classificado por outro caminho
+    enquanto essa chamada estava em voo."""
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_personagens SET classe_falhou = 1 WHERE id = ? AND classe IS NULL",
+            (personagem_id,),
+        )
 
 
 def candidatos_por_raridade(guild_id, raridade, generos, permitir_nsfw):
@@ -1765,7 +1991,7 @@ def comprar_slot_serie_favorita(guild_id, user_id):
     proximo_nivel = nivel_atual + 1
     preco = PRECOS_UPGRADE_SLOT_SERIE_FAVORITA[proximo_nivel]
     if saldo_wishards(guild_id, user_id) < preco:
-        return False, f"Custa {preco} WiShards e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -preco, "upgrade_slot_serie_favorita", f"nivel {proximo_nivel}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
@@ -1778,7 +2004,7 @@ def comprar_slot_serie_favorita(guild_id, user_id):
             (str(guild_id), str(user_id), agora, agora, proximo_nivel),
         )
     total_slots = SLOTS_BASE_SERIE_FAVORITA + proximo_nivel
-    return True, f"Slot de Série Favorita desbloqueado! {total_slots} slots no total (custou {preco} WiShards)."
+    return True, f"Slot de Série Favorita desbloqueado! {total_slots} slots no total (custou {fmt_numero(preco)} WiShards)."
 
 
 def salvar_bonus_series_favoritas(guild_id, user_id, bonus_por_serie):
@@ -1814,6 +2040,129 @@ def bonus_series_favoritas(guild_id, user_id):
             (str(guild_id), str(user_id)),
         ).fetchall()
     return {r["serie"]: r["bonus_percentual"] for r in linhas}
+
+
+# --------------------------------------------------------------------------
+# Personagens Favoritas (2026-09-03, `pandora.personagens_favoritas`) - CRUD
+# puro aqui (mesma divisão de Série Favorita) - Fortalecimento/Ascensão são
+# regra de negócio, moram em `pandora.personagens_favoritas`.
+# --------------------------------------------------------------------------
+
+def personagens_favoritas_do_jogador(guild_id, user_id):
+    """Só os slots JÁ USADOS pelo menos 1x (linha existe) - mesmo espírito
+    de `series_favoritas_do_jogador`. Devolve `[{"slot", "personagem_id",
+    "fortalecimento_bitmask", "nivel_ascensao"}]` ordenado por slot."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT slot, personagem_id, fortalecimento_bitmask, nivel_ascensao FROM colecao_personagens_favoritas "
+            "WHERE guild_id = ? AND user_id = ? ORDER BY slot",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
+def definir_personagem_favorita(guild_id, user_id, slot, personagem_id):
+    """Define (ou limpa, se `personagem_id=None`) o OCUPANTE de um slot -
+    NUNCA toca `fortalecimento_bitmask`/`nivel_ascensao` (progressão
+    pertence ao slot, sobrevive à troca de ocupante, pedido explícito do
+    usuário) - por isso o `ON CONFLICT` só atualiza `personagem_id`/
+    `trocado_em`, nunca as outras 2 colunas."""
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_personagens_favoritas "
+            "(guild_id, user_id, slot, personagem_id, fortalecimento_bitmask, nivel_ascensao, trocado_em) "
+            "VALUES (?, ?, ?, ?, 0, 0, ?) "
+            "ON CONFLICT(guild_id, user_id, slot) DO UPDATE SET "
+            "personagem_id = excluded.personagem_id, trocado_em = excluded.trocado_em",
+            (str(guild_id), str(user_id), slot, personagem_id, agora),
+        )
+
+
+def personagens_favoritas_ocupantes(guild_id, user_id):
+    """{personagem_id: {"slot", "fortalecimento_bitmask", "nivel_ascensao"}}
+    - 1 query batched pra todos os slots OCUPADOS (personagem_id IS NOT
+    NULL), usada por `torre._contexto_lote` (nunca recalculado/consultado
+    por personagem individual no caminho quente, mesmo padrão de
+    `bonus_series_favoritas`)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT slot, personagem_id, fortalecimento_bitmask, nivel_ascensao FROM colecao_personagens_favoritas "
+            "WHERE guild_id = ? AND user_id = ? AND personagem_id IS NOT NULL",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {
+        r["personagem_id"]: {
+            "slot": r["slot"], "fortalecimento_bitmask": r["fortalecimento_bitmask"], "nivel_ascensao": r["nivel_ascensao"],
+        }
+        for r in linhas
+    }
+
+
+def marcar_patamar_fortalecimento(guild_id, user_id, slot, indice):
+    """Liga o bit `indice` do bitmask desse slot (`OR` bit a bit - nunca
+    desliga um já ligado, nunca mexe nos outros bits)."""
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_personagens_favoritas SET fortalecimento_bitmask = fortalecimento_bitmask | ? "
+            "WHERE guild_id = ? AND user_id = ? AND slot = ?",
+            (1 << indice, str(guild_id), str(user_id), slot),
+        )
+
+
+def incrementar_ascensao_personagem_favorita(guild_id, user_id, slot):
+    with conexao() as conn:
+        conn.execute(
+            "UPDATE colecao_personagens_favoritas SET nivel_ascensao = nivel_ascensao + 1 "
+            "WHERE guild_id = ? AND user_id = ? AND slot = ?",
+            (str(guild_id), str(user_id), slot),
+        )
+
+
+# 🔥 Mesma curva de preço de `PRECOS_UPGRADE_SLOT_SERIE_FAVORITA` (WiShards,
+# confirmado com o usuário: "mesma moeda/curva de Série Favorita, não
+# Soulstone") - 5 base + até 20 pagos = 25 no total, mesmo teto de opções de
+# 1 único `discord.ui.Select`.
+PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA = {
+    1: 5_000, 2: 15_000, 3: 40_000, 4: 100_000, 5: 250_000,
+    6: 600_000, 7: 1_400_000, 8: 3_000_000, 9: 6_500_000, 10: 14_000_000,
+    11: 30_000_000, 12: 60_000_000, 13: 125_000_000, 14: 250_000_000, 15: 500_000_000,
+    16: 1_000_000_000, 17: 2_000_000_000, 18: 4_000_000_000, 19: 8_000_000_000, 20: 16_000_000_000,
+}
+SLOTS_BASE_PERSONAGEM_FAVORITA = 5
+NIVEL_MAXIMO_UPGRADE_SLOT_PERSONAGEM_FAVORITA = 20
+
+
+def nivel_upgrade_slots_personagem_favorita(guild_id, user_id):
+    with conexao() as conn:
+        linha = _estado_jogador(conn, guild_id, user_id)
+    return linha["nivel_upgrade_slots_personagem_favorita"] if linha else 0
+
+
+def comprar_slot_personagem_favorita(guild_id, user_id):
+    """Mesmo padrão de `comprar_slot_serie_favorita` - preço escalonado,
+    1 slot a mais por nível, `SLOTS_BASE_PERSONAGEM_FAVORITA` (5) + até
+    `NIVEL_MAXIMO_UPGRADE_SLOT_PERSONAGEM_FAVORITA` (20) = 25 no total."""
+    nivel_atual = nivel_upgrade_slots_personagem_favorita(guild_id, user_id)
+    if nivel_atual >= NIVEL_MAXIMO_UPGRADE_SLOT_PERSONAGEM_FAVORITA:
+        return False, "Você já tem o número máximo de slots de Waifu."
+    proximo_nivel = nivel_atual + 1
+    preco = PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA[proximo_nivel]
+    if saldo_wishards(guild_id, user_id) < preco:
+        return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
+    creditar_wishards(guild_id, user_id, -preco, "upgrade_slot_personagem_favorita", f"nivel {proximo_nivel}")
+    agora = datetime.now(timezone.utc).isoformat()
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_estado_jogador ("
+            "guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, "
+            "nivel_upgrade_slots_personagem_favorita"
+            ") VALUES (?, ?, 0, ?, 1, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel_upgrade_slots_personagem_favorita = excluded.nivel_upgrade_slots_personagem_favorita",
+            (str(guild_id), str(user_id), agora, agora, proximo_nivel),
+        )
+    total_slots = SLOTS_BASE_PERSONAGEM_FAVORITA + proximo_nivel
+    return True, f"Slot de Waifu desbloqueado! {total_slots} slots no total (custou {fmt_numero(preco)} WiShards)."
 
 
 # --------------------------------------------------------------------------
@@ -2016,7 +2365,7 @@ def subir_nivel_ate(guild_id, user_id, personagem_id, nivel_alvo):
         return False, f"Nível máximo é {NIVEL_MAXIMO_PERSONAGEM}."
     custo = custo_total_ate_nivel(personagem["raridade"], nivel_atual, nivel_alvo)
     if saldo_wishards(guild_id, user_id) < custo:
-        return False, f"Custa {custo} WiShards e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -custo, "upgrade_nivel_personagem", personagem["nome"], str(personagem_id))
     with conexao() as conn:
         conn.execute(
@@ -2026,7 +2375,7 @@ def subir_nivel_ate(guild_id, user_id, personagem_id, nivel_alvo):
         )
     xp = custo // 5
     creditar_xp_progressao(guild_id, user_id, xp)
-    return True, f"{personagem['nome']} subiu pro nível {nivel_alvo}! (custou {custo} WiShards, +{xp} XP de Progressão)"
+    return True, f"{personagem['nome']} subiu pro nível {nivel_alvo}! (custou {fmt_numero(custo)} WiShards, +{fmt_numero(xp)} XP de Progressão)"
 
 
 NIVEL_MAXIMO_AFINIDADE = 10
@@ -2072,7 +2421,7 @@ def subir_afinidade_ate(guild_id, user_id, personagem_id, afinidade_alvo):
         return False, f"Afinidade máxima é {NIVEL_MAXIMO_AFINIDADE}."
     custo = custo_total_ate_afinidade(afinidade_atual, afinidade_alvo)
     if saldo_soulstone(guild_id, user_id) < custo:
-        return False, f"Custa {custo} Soulstone e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(custo)} Soulstone e você não tem o suficiente."
     creditar_soulstone(guild_id, user_id, -custo, "upgrade_afinidade", personagem["nome"], str(personagem_id))
     with conexao() as conn:
         conn.execute(
@@ -2080,7 +2429,7 @@ def subir_afinidade_ate(guild_id, user_id, personagem_id, afinidade_alvo):
             "ON CONFLICT(guild_id, user_id, personagem_id) DO UPDATE SET afinidade = excluded.afinidade",
             (str(guild_id), str(user_id), personagem_id, afinidade_alvo),
         )
-    return True, f"{personagem['nome']} subiu pra Afinidade {afinidade_alvo}! (custou {custo} Soulstone)"
+    return True, f"{personagem['nome']} subiu pra Afinidade {afinidade_alvo}! (custou {fmt_numero(custo)} Soulstone)"
 
 
 def tornar_soulmate(guild_id, user_id, personagem_id):
@@ -2201,7 +2550,7 @@ def comprar_personagem(guild_id, user_id, personagem_id):
         return False, "Essa personagem já tem dono nesse servidor."
     preco = PRECOS_LOJA.get(personagem["raridade"])
     if saldo_wishards(guild_id, user_id) < preco:
-        return False, f"Custa {preco} WiShards e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
 
     creditar_wishards(guild_id, user_id, -preco, "loja_compra", personagem["nome"], str(personagem_id))
     if not reivindicar(guild_id, personagem_id, user_id):
@@ -2209,7 +2558,7 @@ def comprar_personagem(guild_id, user_id, personagem_id):
         return False, "Alguém conseguiu essa personagem antes de você - reembolsado."
 
     definir_afinidade_inicial(guild_id, user_id, personagem_id)
-    return True, f"{personagem['nome']} comprada por {preco} WiShards."
+    return True, f"{personagem['nome']} comprada por {fmt_numero(preco)} WiShards."
 
 
 def definir_garantia(guild_id, user_id, raridade_minima):
@@ -2367,57 +2716,14 @@ def atualizar_status_proposta(proposta_id, status):
         conn.execute("UPDATE colecao_troca_proposta SET status = ? WHERE id = ?", (status, proposta_id))
 
 
-# ---- Wishlist ----
-
-def wishlist_adicionar(guild_id, user_id, personagem_id):
-    agora = datetime.now(timezone.utc).isoformat()
-    with conexao() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO colecao_wishlist (guild_id, user_id, personagem_id, adicionado_em) "
-            "VALUES (?, ?, ?, ?)",
-            (str(guild_id), str(user_id), personagem_id, agora),
-        )
-
-
-def wishlist_remover(guild_id, user_id, personagem_id):
-    with conexao() as conn:
-        conn.execute(
-            "DELETE FROM colecao_wishlist WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
-            (str(guild_id), str(user_id), personagem_id),
-        )
-
-
-def wishlist_listar(guild_id, user_id):
-    # 🔥 ordenado por popularidade DESC, não por nome (2026-08-30, pedido
-    # do usuário: "Todo dropdwon q listar waifu, sempre ordene pelas com
-    # maior CP/popularidade") - wishlist é NÃO possuída (sem Nível/
-    # Afinidade de vínculo nenhum), então CP não se aplica aqui.
-    with conexao() as conn:
-        linhas = conn.execute(
-            "SELECT p.* FROM colecao_wishlist w JOIN colecao_personagens p ON p.id = w.personagem_id "
-            "WHERE w.guild_id = ? AND w.user_id = ? ORDER BY p.popularidade DESC",
-            (str(guild_id), str(user_id)),
-        ).fetchall()
-        return [dict(r) for r in linhas]
-
-
-def wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw):
-    """Itens da wishlist que ainda não têm dono NESSE servidor - candidatos
-    reais pro "wish roll" (ver `eris/colecao/gacha.py`) - a wishlist aumenta
-    moderadamente a chance, nunca garante o aparecimento (PLANO_COLECAO_
-    WAIFUS.md, Seção 12)."""
-    filtros = ["w.guild_id = ?", "w.user_id = ?", "p.ativo = 1"]
-    params = [str(guild_id), str(user_id)]
-    if not permitir_nsfw:
-        filtros.append("p.nsfw = 0")
-    filtros.append("p.id NOT IN (SELECT personagem_id FROM colecao_propriedade WHERE guild_id = ?)")
-    params.append(str(guild_id))
-    sql = (
-        "SELECT p.id FROM colecao_wishlist w JOIN colecao_personagens p ON p.id = w.personagem_id "
-        f"WHERE {' AND '.join(filtros)}"
-    )
-    with conexao() as conn:
-        return [r["id"] for r in conn.execute(sql, params).fetchall()]
+# ---- Tabela `colecao_wishlist` original (2026-09-03, MECANISMO
+# APOSENTADO - fundido no antigo Favoritos, que herdou o nome "wishlist"
+# pras funções, ver seção "Wishlist" acima) - a tabela em si continua
+# existindo (sem migração destrutiva), mas nada mais escreve/lê nela;
+# `db.inicializar()` copiou 1x todo o conteúdo pra `colecao_favoritas`
+# (ver comentário lá). `wishlist_adicionar`/`wishlist_remover`/
+# `wishlist_listar`/`wishlist_disponiveis_no_guild`/`esta_na_wishlist`
+# (seção "Wishlist" acima) são o caminho único agora, pra possuída ou não.
 
 
 # ---- Cooldowns (rolls/claims por ciclo) ----
@@ -2569,9 +2875,14 @@ def tempo_restante(guild_id, user_id, coluna_restante, coluna_reset, limite, jan
 # --------------------------------------------------------------------------
 # Recompensa Diária (2026-09-02, pedido do usuário - Seção 6/29 do plano
 # original: "eventual recompensa diária") - reset por DIA DE CALENDÁRIO em
-# UTC, diferente de rolls/claims (janela rolante fixa em minutos) - dá pra
-# resgatar de novo a partir da meia-noite UTC, não 24h exatas depois do
-# último clique.
+# horário de BRASÍLIA (`FUSO_BRASILIA`, 2026-09-03 - achado do usuário
+# "Recompensa Diária tem q resetar as 0h": comparar por data em UTC fazia o
+# resgate liberar de novo às 21h de Brasília, não à meia-noite local),
+# diferente de rolls/claims (janela rolante fixa em minutos) - dá pra
+# resgatar de novo a partir da meia-noite de Brasília, não 24h exatas
+# depois do último clique. O timestamp GRAVADO continua em UTC (mesmo
+# padrão do resto do banco) - só a COMPARAÇÃO de "que dia é hoje" converte
+# pro fuso local antes de extrair `.date()`.
 # --------------------------------------------------------------------------
 
 RECOMPENSA_DIARIA_WISHARDS = 150  # valor POR NÍVEL de Progressão (2026-09-02, pedido do usuário: "multiplicada os wishards pelo nivel da progressao") - fica pra balanceamento, como o resto
@@ -2579,14 +2890,14 @@ RECOMPENSA_DIARIA_WISHARDS = 150  # valor POR NÍVEL de Progressão (2026-09-02,
 
 def diaria_disponivel(guild_id, user_id):
     """True se o jogador ainda não resgatou a Recompensa Diária HOJE (data
-    de calendário em UTC) - nunca ter resgatado (linha/coluna None) conta
-    como disponível."""
+    de calendário em horário de Brasília) - nunca ter resgatado (linha/
+    coluna None) conta como disponível."""
     with conexao() as conn:
         linha = _estado_jogador(conn, guild_id, user_id)
     if linha is None or linha["diaria_reivindicada_em"] is None:
         return True
-    ultima = datetime.fromisoformat(linha["diaria_reivindicada_em"])
-    return ultima.date() < datetime.now(timezone.utc).date()
+    ultima = datetime.fromisoformat(linha["diaria_reivindicada_em"]).astimezone(FUSO_BRASILIA)
+    return ultima.date() < datetime.now(FUSO_BRASILIA).date()
 
 
 def reivindicar_diaria(guild_id, user_id):
@@ -2598,7 +2909,8 @@ def reivindicar_diaria(guild_id, user_id):
     with conexao() as conn:
         linha = _estado_jogador(conn, guild_id, user_id)
         if linha is not None and linha["diaria_reivindicada_em"] is not None:
-            if datetime.fromisoformat(linha["diaria_reivindicada_em"]).date() >= agora.date():
+            ultima_local = datetime.fromisoformat(linha["diaria_reivindicada_em"]).astimezone(FUSO_BRASILIA)
+            if ultima_local.date() >= agora.astimezone(FUSO_BRASILIA).date():
                 return False
         conn.execute(
             "INSERT INTO colecao_estado_jogador "
@@ -2660,10 +2972,22 @@ def series_bloqueadas(guild_id):
 
 
 # --------------------------------------------------------------------------
-# Favoritas/Protegidas (Seção 15)
+# Wishlist (Seção 15 - "Favoritas/Protegidas" original) - 2026-09-03, fusão
+# Favoritos+Wishlist ("tem Favoritos e Wishlist, Vamos unir tudo em
+# Wishlist... melhor manter o favoritos e apenas renomea-lo para wishlist,
+# vc ta mantendo o nome das funcoes relacionadas a essa uniao como
+# wishlist?") - MECANISMO de baixo nível é o antigo Favoritos (tabela
+# `colecao_favoritas`, sempre mais simples/direto - "é pego com emote e
+# botão fácil"), mas as FUNÇÕES agora chamam "wishlist" (reaproveitando os
+# nomes exatos que `colecao_wishlist`/o comando `/wishlist` antigo já
+# usavam) - é o nome que sobrevive de verdade daqui pra frente. O card
+# "🔍 Personagem" (`_ViewNivel.favoritar`) e o navegador de Série
+# (`_ViewNavegarSerie._favoritar`) continuam com esse VERBO/rótulo visível
+# ("Favoritar"/"Desfavoritar") - é o atalho rápido que o usuário pediu pra
+# manter tal como está -, só chamando essas funções por baixo agora.
 # --------------------------------------------------------------------------
 
-def favoritar(guild_id, user_id, personagem_id):
+def wishlist_adicionar(guild_id, user_id, personagem_id):
     with conexao() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO colecao_favoritas (guild_id, user_id, personagem_id) VALUES (?, ?, ?)",
@@ -2671,7 +2995,7 @@ def favoritar(guild_id, user_id, personagem_id):
         )
 
 
-def desfavoritar(guild_id, user_id, personagem_id):
+def wishlist_remover(guild_id, user_id, personagem_id):
     with conexao() as conn:
         conn.execute(
             "DELETE FROM colecao_favoritas WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
@@ -2679,7 +3003,7 @@ def desfavoritar(guild_id, user_id, personagem_id):
         )
 
 
-def eh_favorita(guild_id, user_id, personagem_id):
+def esta_na_wishlist(guild_id, user_id, personagem_id):
     with conexao() as conn:
         linha = conn.execute(
             "SELECT 1 FROM colecao_favoritas WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
@@ -2688,22 +3012,39 @@ def eh_favorita(guild_id, user_id, personagem_id):
     return linha is not None
 
 
-def favoritos_listar(guild_id, user_id):
-    """Personagens marcadas como favorita por esse jogador (2026-09-02,
-    pedido do usuário: "quero q tenha uma lista com meus personagens
-    favoritos, assim como tem so de personagens") - mesmo formato de
-    `colecao_do_usuario` (afinidade/soulmate inclusos, pra `consulta.
-    linha_personagem` mostrar igual à Coleção), só filtrado pelas
-    marcadas em `colecao_favoritas`. Ordenado por popularidade DESC,
-    mesmo critério de `wishlist_listar` (sem CP de vínculo aqui, é lista
-    simples de exibição)."""
+def wishlist_listar(guild_id, user_id):
+    """Personagens na Wishlist desse jogador (2026-09-02, pedido do
+    usuário: "quero q tenha uma lista com meus personagens favoritos,
+    assim como tem so de personagens"; renomeada em 2026-09-03 na fusão
+    com a Wishlist antiga) - mesmo formato de `colecao_do_usuario`
+    (afinidade/soulmate inclusos, pra `consulta.linha_personagem` mostrar
+    igual à Coleção), só filtrado pelas marcadas em `colecao_favoritas`
+    (nome da TABELA não mudou, só as funções que a usam). Ordenado por
+    popularidade DESC.
+
+    🔥 `JOIN` -> `LEFT JOIN` com `colecao_propriedade` (2026-09-03) - a
+    Wishlist passou a aceitar personagem NÃO possuída também (era exigido
+    antes, ver `paineis.py`/`eris/bot.py` - as checagens de posse saíram
+    de lá). `reivindicado_em` volta `None` pra quem ainda não tem dono
+    nesse servidor - é o jeito de quem chama distinguir "já é sua" de
+    "ainda só na lista de desejos", sem precisar de uma coluna nova.
+
+    🔥 `dono_id` de verdade (2026-09-03, "A wishlist tem q ser igual a
+    tela de personagem, mostrando imagem e com os msm botoes") - `own`
+    é um 2º `LEFT JOIN` em `colecao_propriedade` SEM restringir por dono
+    (dá o dono REAL, seja o próprio autor, outro jogador, ou `None` se
+    livre) - o `reivindicado_em` acima só sabia dizer "é do autor ou não",
+    o navegador de card (`ViewWishlistHub`) precisa dos 3 estados (Livre/
+    É sua/De outro jogador) pra decidir quais botões habilitar, mesmo
+    padrão de `personagens_da_serie_paginada`."""
     with conexao() as conn:
         linhas = conn.execute(
-            "SELECT p.*, c.reivindicado_em, COALESCE(a.afinidade, 1) AS afinidade, "
+            "SELECT p.*, own.dono_id, c.reivindicado_em, COALESCE(a.afinidade, 1) AS afinidade, "
             "COALESCE(a.is_soulmate, 0) AS is_soulmate "
             "FROM colecao_favoritas f "
             "JOIN colecao_personagens p ON p.id = f.personagem_id "
-            "JOIN colecao_propriedade c ON c.guild_id = f.guild_id AND c.dono_id = f.user_id AND c.personagem_id = f.personagem_id "
+            "LEFT JOIN colecao_propriedade own ON own.guild_id = f.guild_id AND own.personagem_id = f.personagem_id "
+            "LEFT JOIN colecao_propriedade c ON c.guild_id = f.guild_id AND c.dono_id = f.user_id AND c.personagem_id = f.personagem_id "
             "LEFT JOIN colecao_afinidade a "
             "  ON a.guild_id = f.guild_id AND a.user_id = f.user_id AND a.personagem_id = f.personagem_id "
             "WHERE f.guild_id = ? AND f.user_id = ? "
@@ -2711,6 +3052,27 @@ def favoritos_listar(guild_id, user_id):
             (str(guild_id), str(user_id)),
         ).fetchall()
         return [dict(r) for r in linhas]
+
+
+def wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw):
+    """Itens da Wishlist que ainda não têm dono NESSE servidor - candidatos
+    reais pro "wish roll" (`gacha._sortear_um`) - a lista aumenta
+    moderadamente a chance, nunca garante o aparecimento (PLANO_COLECAO_
+    WAIFUS.md, Seção 12). Mesmo nome/contrato da função antiga (que lia
+    `colecao_wishlist`) - só a fonte virou `colecao_favoritas` na fusão de
+    2026-09-03."""
+    filtros = ["f.guild_id = ?", "f.user_id = ?", "p.ativo = 1"]
+    params = [str(guild_id), str(user_id)]
+    if not permitir_nsfw:
+        filtros.append("p.nsfw = 0")
+    filtros.append("p.id NOT IN (SELECT personagem_id FROM colecao_propriedade WHERE guild_id = ?)")
+    params.append(str(guild_id))
+    sql = (
+        "SELECT p.id FROM colecao_favoritas f JOIN colecao_personagens p ON p.id = f.personagem_id "
+        f"WHERE {' AND '.join(filtros)}"
+    )
+    with conexao() as conn:
+        return [r["id"] for r in conn.execute(sql, params).fetchall()]
 
 
 # --------------------------------------------------------------------------
@@ -3165,8 +3527,19 @@ NIVEIS_PROGRESSAO_POR_PONTO_PERCENTUAL = 5
 # 18%") custando 1.000 (100×10).
 BONUS_FIXO_POR_NIVEL_TREINAMENTO = 25
 BONUS_PERCENTUAL_POR_NIVEL_POTENCIAL = 2
-CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL = 50
-CUSTO_POTENCIAL_COLECAO_POR_NIVEL = 100
+# 🔥 Curva virou QUADRÁTICA (2026-09-03, pedido do usuário: "aumenta mais
+# o custo. Eu tenho 28m, e comprar 25 melhorias ja no lv350 n sai nem por
+# 1M") - a curva LINEAR antiga (`custo(n) = C * n`) deixava o Nv.350
+# custando só 35.000/17.500 (Potencial/Treinamento) - barato demais pra
+# quem já tem dezenas de milhões. `custo(n) = C * n²` cresce muito mais
+# rápido em nível alto SEM mexer no preço de quem ainda está no início -
+# as 2 constantes abaixo foram escolhidas pra CRUZAR com o preço linear
+# antigo exatamente no Nível 50 (`C_novo = C_antigo / 50`): quem está
+# abaixo do Nv.50 paga um pouco MENOS que antes, quem está acima paga
+# cada vez mais. Ex.: Potencial Nv.350 sozinho vai de 35.000 pra 245.000
+# (7x); um pacote de 25 níveis perto do 350 vai de ~845.000 pra ~5,7M.
+CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL = 1
+CUSTO_POTENCIAL_COLECAO_POR_NIVEL = 2
 # 🔥 Marcos de coleção única (Seção 11 - "não deve ser a principal fonte
 # infinita de CP", só milestone pontual). XP = marco × 10 (100
 # personagens -> 1.000 XP, 1.000 -> 10.000 XP).
@@ -3375,7 +3748,7 @@ def bonus_classes_por_categoria(guild_id, user_id):
 
 
 def custo_treinamento_global(nivel_alvo):
-    return CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL * nivel_alvo
+    return CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL * nivel_alvo * nivel_alvo
 
 
 def custo_total_treinamento_ate(nivel_atual, nivel_alvo):
@@ -3399,7 +3772,7 @@ def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
         return False, f"Treinamento Global já está no Nível {nivel_atual} ou acima."
     custo = custo_total_treinamento_ate(nivel_atual, nivel_alvo)
     if saldo_wishards(guild_id, user_id) < custo:
-        return False, f"Custa {custo} WiShards e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -custo, "treinamento_global", f"nível {nivel_atual}->{nivel_alvo}")
     with conexao() as conn:
         conn.execute(
@@ -3408,11 +3781,11 @@ def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
             (str(guild_id), str(user_id), nivel_alvo),
         )
     bonus_total = nivel_alvo * BONUS_FIXO_POR_NIVEL_TREINAMENTO
-    return True, f"Treinamento Global Nv.{nivel_alvo}! +{bonus_total} CP fixo por personagem, pra sempre (custou {custo} WiShards)."
+    return True, f"Treinamento Global Nv.{nivel_alvo}! +{fmt_numero(bonus_total)} CP fixo por personagem, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 def custo_potencial_colecao(nivel_alvo):
-    return CUSTO_POTENCIAL_COLECAO_POR_NIVEL * nivel_alvo
+    return CUSTO_POTENCIAL_COLECAO_POR_NIVEL * nivel_alvo * nivel_alvo
 
 
 def custo_total_potencial_ate(nivel_atual, nivel_alvo):
@@ -3434,7 +3807,7 @@ def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
         return False, f"Potencial da Coleção já está no Nível {nivel_atual} ou acima."
     custo = custo_total_potencial_ate(nivel_atual, nivel_alvo)
     if saldo_wishards(guild_id, user_id) < custo:
-        return False, f"Custa {custo} WiShards e você não tem o suficiente."
+        return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -custo, "potencial_colecao", f"nível {nivel_atual}->{nivel_alvo}")
     with conexao() as conn:
         conn.execute(
@@ -3443,7 +3816,7 @@ def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
             (str(guild_id), str(user_id), nivel_alvo),
         )
     bonus_total = nivel_alvo * BONUS_PERCENTUAL_POR_NIVEL_POTENCIAL
-    return True, f"Potencial da Coleção Nv.{nivel_alvo}! +{bonus_total}% CP global, pra sempre (custou {custo} WiShards)."
+    return True, f"Potencial da Coleção Nv.{nivel_alvo}! +{bonus_total}% CP global, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 def maior_marco_colecao_atingido(guild_id, user_id):
@@ -3566,7 +3939,27 @@ def funcao_cidade_da_classe(classe):
 
 PRECOS_UPGRADE_ROLLS = {1: 1000, 2: 2500, 3: 5000, 4: 10000, 5: 25000}
 BONUS_ROLLS_POR_NIVEL = 5
-NIVEL_MAXIMO_UPGRADE_ROLLS = 5
+# 🔥 Nível máximo REMOVIDO (2026-09-03, pedido do usuário: "vamos remover
+# limite de compra de upgrade de rolls e claims") - preço dos 5 primeiros
+# níveis preservado (`PRECOS_UPGRADE_ROLLS`, ninguém que já comprou paga
+# retroativo diferente); a partir do nível 6, `preco_upgrade_rolls` continua
+# a mesma progressão geométrica (dobra por nível), mesmo espírito SEM TETO
+# de Treinamento Global/Potencial da Coleção.
+
+
+def preco_upgrade_rolls(nivel):
+    if nivel in PRECOS_UPGRADE_ROLLS:
+        return PRECOS_UPGRADE_ROLLS[nivel]
+    return PRECOS_UPGRADE_ROLLS[5] * (2 ** (nivel - 5))
+
+
+def custo_total_upgrade_rolls_ate(nivel_atual, nivel_alvo):
+    """Soma o custo de CADA nível de `nivel_atual` até `nivel_alvo` (mesmo
+    padrão de `custo_total_treinamento_ate`) - 0 se `nivel_alvo` não for
+    maior que o atual."""
+    if nivel_alvo <= nivel_atual:
+        return 0
+    return sum(preco_upgrade_rolls(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
 
 
 def nivel_upgrade_rolls(guild_id, user_id):
@@ -3575,19 +3968,21 @@ def nivel_upgrade_rolls(guild_id, user_id):
     return linha["nivel_upgrade_rolls"] if linha else 0
 
 
-def comprar_upgrade_rolls(guild_id, user_id):
-    """Devolve (ok: bool, mensagem: str). Nível N custa `PRECOS_UPGRADE_
-    ROLLS[N]` e soma +5 rolls PERMANENTES em cima do `rolls_por_ciclo` do
+def comprar_upgrade_rolls_ate(guild_id, user_id, nivel_alvo):
+    """Devolve (ok: bool, mensagem: str) - pula DIRETO pro `nivel_alvo`
+    (2026-09-03, substitui o antigo "+1 nível por clique" agora que o
+    upgrade não tem mais teto - dropdown escolhe o alvo, custo é a soma de
+    todos os degraus, mesmo padrão de `comprar_treinamento_global_ate`).
+    +5 rolls PERMANENTES por nível em cima do `rolls_por_ciclo` do
     servidor (nunca substitui a config do servidor, só soma)."""
     nivel_atual = nivel_upgrade_rolls(guild_id, user_id)
-    if nivel_atual >= NIVEL_MAXIMO_UPGRADE_ROLLS:
-        return False, "Você já está no nível máximo desse upgrade."
-    proximo_nivel = nivel_atual + 1
-    preco = PRECOS_UPGRADE_ROLLS[proximo_nivel]
-    if saldo_wishards(guild_id, user_id) < preco:
-        return False, f"Custa {preco} WiShards e você não tem o suficiente."
+    if nivel_alvo <= nivel_atual:
+        return False, f"Upgrade de rolls já está no nível {nivel_atual} ou acima."
+    custo = custo_total_upgrade_rolls_ate(nivel_atual, nivel_alvo)
+    if saldo_wishards(guild_id, user_id) < custo:
+        return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
 
-    creditar_wishards(guild_id, user_id, -preco, "upgrade_rolls", f"nivel {proximo_nivel}")
+    creditar_wishards(guild_id, user_id, -custo, "upgrade_rolls", f"nível {nivel_atual}->{nivel_alvo}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
@@ -3595,10 +3990,10 @@ def comprar_upgrade_rolls(guild_id, user_id):
             "guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, nivel_upgrade_rolls"
             ") VALUES (?, ?, 0, ?, 1, ?, ?) "
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel_upgrade_rolls = excluded.nivel_upgrade_rolls",
-            (str(guild_id), str(user_id), agora, agora, proximo_nivel),
+            (str(guild_id), str(user_id), agora, agora, nivel_alvo),
         )
-    bonus_total = proximo_nivel * BONUS_ROLLS_POR_NIVEL
-    return True, f"Upgrade de rolls nível {proximo_nivel}! +{bonus_total} rolls por ciclo, pra sempre (custou {preco} WiShards)."
+    bonus_total = nivel_alvo * BONUS_ROLLS_POR_NIVEL
+    return True, f"Upgrade de rolls nível {nivel_alvo}! +{fmt_numero(bonus_total)} rolls por ciclo, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 # --------------------------------------------------------------------------
@@ -3612,7 +4007,20 @@ def comprar_upgrade_rolls(guild_id, user_id):
 
 PRECOS_UPGRADE_CLAIMS = {1: 2000, 2: 5000, 3: 10000, 4: 20000, 5: 40000}
 BONUS_CLAIMS_POR_NIVEL = 1
-NIVEL_MAXIMO_UPGRADE_CLAIMS = 5
+# 🔥 Nível máximo REMOVIDO (2026-09-03) - mesmo motivo/padrão de
+# `preco_upgrade_rolls` acima.
+
+
+def preco_upgrade_claims(nivel):
+    if nivel in PRECOS_UPGRADE_CLAIMS:
+        return PRECOS_UPGRADE_CLAIMS[nivel]
+    return PRECOS_UPGRADE_CLAIMS[5] * (2 ** (nivel - 5))
+
+
+def custo_total_upgrade_claims_ate(nivel_atual, nivel_alvo):
+    if nivel_alvo <= nivel_atual:
+        return 0
+    return sum(preco_upgrade_claims(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
 
 
 def nivel_upgrade_claims(guild_id, user_id):
@@ -3621,20 +4029,19 @@ def nivel_upgrade_claims(guild_id, user_id):
     return linha["nivel_upgrade_claims"] if linha else 0
 
 
-def comprar_upgrade_claims(guild_id, user_id):
-    """Devolve (ok: bool, mensagem: str). Nível N custa `PRECOS_UPGRADE_
-    CLAIMS[N]` e soma +1 claim PERMANENTE em cima do `claims_por_ciclo` do
-    servidor (nunca substitui a config do servidor, só soma) - mesmo
-    padrão de `comprar_upgrade_rolls`."""
+def comprar_upgrade_claims_ate(guild_id, user_id, nivel_alvo):
+    """Devolve (ok: bool, mensagem: str) - mesmo padrão de `comprar_
+    upgrade_rolls_ate`. +1 claim PERMANENTE por nível em cima do
+    `claims_por_ciclo` do servidor (nunca substitui a config do servidor,
+    só soma)."""
     nivel_atual = nivel_upgrade_claims(guild_id, user_id)
-    if nivel_atual >= NIVEL_MAXIMO_UPGRADE_CLAIMS:
-        return False, "Você já está no nível máximo desse upgrade."
-    proximo_nivel = nivel_atual + 1
-    preco = PRECOS_UPGRADE_CLAIMS[proximo_nivel]
-    if saldo_wishards(guild_id, user_id) < preco:
-        return False, f"Custa {preco} WiShards e você não tem o suficiente."
+    if nivel_alvo <= nivel_atual:
+        return False, f"Upgrade de claims já está no nível {nivel_atual} ou acima."
+    custo = custo_total_upgrade_claims_ate(nivel_atual, nivel_alvo)
+    if saldo_wishards(guild_id, user_id) < custo:
+        return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
 
-    creditar_wishards(guild_id, user_id, -preco, "upgrade_claims", f"nivel {proximo_nivel}")
+    creditar_wishards(guild_id, user_id, -custo, "upgrade_claims", f"nível {nivel_atual}->{nivel_alvo}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
@@ -3642,10 +4049,10 @@ def comprar_upgrade_claims(guild_id, user_id):
             "guild_id, user_id, rolls_restantes, rolls_resetam_em, claims_restantes, claims_resetam_em, nivel_upgrade_claims"
             ") VALUES (?, ?, 0, ?, 1, ?, ?) "
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel_upgrade_claims = excluded.nivel_upgrade_claims",
-            (str(guild_id), str(user_id), agora, agora, proximo_nivel),
+            (str(guild_id), str(user_id), agora, agora, nivel_alvo),
         )
-    bonus_total = proximo_nivel * BONUS_CLAIMS_POR_NIVEL
-    return True, f"Upgrade de claims nível {proximo_nivel}! +{bonus_total} claim(s) por ciclo, pra sempre (custou {preco} WiShards)."
+    bonus_total = nivel_alvo * BONUS_CLAIMS_POR_NIVEL
+    return True, f"Upgrade de claims nível {nivel_alvo}! +{fmt_numero(bonus_total)} claim(s) por ciclo, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 # --------------------------------------------------------------------------
@@ -3905,6 +4312,27 @@ def itens_do_jogador(guild_id, user_id):
     return {r["item"]: r["quantidade"] for r in linhas}
 
 
+def total_comprado_item(guild_id, user_id, item):
+    """Quantas unidades desse item o jogador JÁ comprou na Loja (vitalício,
+    nunca decrementado por uso) - base do preço escalável (`pandora.itens.
+    custo_total_item`)."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT total FROM colecao_compras_item WHERE guild_id = ? AND user_id = ? AND item = ?",
+            (str(guild_id), str(user_id), item),
+        ).fetchone()
+    return linha["total"] if linha else 0
+
+
+def registrar_compra_item(guild_id, user_id, item, quantidade):
+    with conexao() as conn:
+        conn.execute(
+            "INSERT INTO colecao_compras_item (guild_id, user_id, item, total) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id, item) DO UPDATE SET total = total + excluded.total",
+            (str(guild_id), str(user_id), item, quantidade),
+        )
+
+
 # --------------------------------------------------------------------------
 # Proteção PvP (2026-09-01, item "Proteção", Seção 7)
 # --------------------------------------------------------------------------
@@ -4021,6 +4449,20 @@ def chave_torre_ativa(guild_id, user_id):
 # Construções da Cidade (2026-09-01, item "Upgrade de Construção", Seção 10)
 # --------------------------------------------------------------------------
 
+# 🔥 Fonte ÚNICA das 6 áreas (2026-09-03, pedido do usuário: "vc tem
+# distinguindo construção de area, mas é a msm coisa, so use area") -
+# antes existiam 2 listas quase-duplicadas (`itens.AREAS_CONSTRUCAO`, um
+# dict área->nome de construção tipo "Quartel"/"Hospital" nunca usado de
+# um jeito que precisasse ser diferente da área; `cidade.FUNCOES_CIDADE`,
+# o mesmo tuple de 6 nomes) - unificadas aqui, a única que o teto
+# DINÂMICO abaixo pode enxergar sem criar import cíclico (`itens.py` e
+# `cidade.py` já importam `db.py`, nunca o contrário). `itens.
+# AREAS_CONSTRUCAO`/`cidade.FUNCOES_CIDADE` viraram aliases pra esta.
+AREAS_CONSTRUCAO = ("Militar", "Saúde", "Cultura", "Administração", "Comércio", "Arcano")
+
+NIVEL_MAXIMO_CONSTRUCAO_BASE = 10  # primeiro degrau do teto dinâmico, ver `teto_atual_construcao`
+
+
 def nivel_construcao(guild_id, user_id, area):
     with conexao() as conn:
         linha = conn.execute(
@@ -4040,12 +4482,34 @@ def niveis_construcoes(guild_id, user_id):
     return {r["area"]: r["nivel"] for r in linhas}
 
 
-def subir_construcao(guild_id, user_id, area):
+def teto_atual_construcao(guild_id, user_id):
+    """Teto de nível vigente pra upgrade de QUALQUER área (2026-09-03,
+    pedido do usuário: "os upgrades maximos vao ser a cd 10 lv, e o
+    limite so é quebrado qnd todas as reas tao no maximo. Ai o limite
+    aumenta em +10, e vai indo") - começa em `NIVEL_MAXIMO_CONSTRUCAO_
+    BASE` (10); só sobe +10 quando TODAS as 6 áreas já bateram o teto
+    anterior - a área MAIS ATRASADA decide o teto vigente pra TODAS, não
+    cada uma o seu próprio (área nunca comprada conta como nível 0, o
+    pior caso possível). O teto é sempre RECALCULADO na hora (nunca
+    gravado) - no instante em que a última área atrasada alcança o teto
+    velho, a própria leitura seguinte já devolve o teto novo, sem
+    precisar de um passo separado de "destravar"."""
+    niveis = niveis_construcoes(guild_id, user_id)
+    nivel_minimo = min((niveis.get(area, 0) for area in AREAS_CONSTRUCAO), default=0)
+    return NIVEL_MAXIMO_CONSTRUCAO_BASE * (nivel_minimo // NIVEL_MAXIMO_CONSTRUCAO_BASE + 1)
+
+
+def subir_construcao(guild_id, user_id, area, quantidade=1):
+    """`quantidade` (2026-09-03, pedido do usuário: "alguns [itens] pode
+    permitir usar varios por vez, como o upgrade de construção, q upo a
+    msm construção varios lv por vez") - soma `quantidade` níveis de uma
+    vez, 1 única escrita (era sempre +1, chamada em loop faria N
+    round-trips no banco à toa pra uma compra em lote)."""
     with conexao() as conn:
         conn.execute(
-            "INSERT INTO colecao_construcoes (guild_id, user_id, area, nivel) VALUES (?, ?, ?, 1) "
-            "ON CONFLICT(guild_id, user_id, area) DO UPDATE SET nivel = nivel + 1",
-            (str(guild_id), str(user_id), area),
+            "INSERT INTO colecao_construcoes (guild_id, user_id, area, nivel) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id, area) DO UPDATE SET nivel = nivel + excluded.nivel",
+            (str(guild_id), str(user_id), area, quantidade),
         )
         linha = conn.execute(
             "SELECT nivel FROM colecao_construcoes WHERE guild_id = ? AND user_id = ? AND area = ?",
