@@ -16,6 +16,10 @@ dist/
 # Banco de dados real em runtime
 data/*.db
 
+# Cache do catálogo externo get_waifu (~94MB, baixado/atualizado sozinho
+# pelo sincronizador semanal - ver pandora/importar_get_waifu.py)
+data/catalogo_get_waifu.json
+
 # Editores / SO
 .vscode/
 .idea/

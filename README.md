@@ -1,59 +1,76 @@
+<p align="center">
+  <img src="assets/icone_pandora.png" alt="Project PANDORA" width="180">
+</p>
+
 # Project PANDORA
 
-Colecionador de Personagens (gacha estilo Mudae) - rolls, claims, Afinidade/
-WiShards, loja, Merge, trocas, Party/Vitrine e a Prova de Soulmate.
-EXTRAÍDO do [Project-ERIS](../Project-ERIS) em 2026-08-29, quando o
-Colecionador já era a maioria do código/schema daquele repo (~2.780 linhas
-em `eris/colecao/*`, 14 de 19 tabelas de `eris/db.py`).
+Jogo de coleção e progressão de personagens com rolls, claims, afinidade, economia, party, batalhas e eventos.
 
-Diferente dos outros satélites do ecossistema (MOIRAI/ECHO/HESTIA/IRIS -
-processo próprio + ponte HTTP, sem UI), o PANDORA é uma **biblioteca Python
-local, sem processo/porta próprios** - decisão explícita: todo clique de
-roll/claim/troca cai dentro do orçamento de 3s de resposta do Discord, que
-já causou 2 bugs reais de timeout no Colecionador antes da extração. Um
-satélite HTTP colocaria uma chamada de rede em cima de CADA clique -
-exatamente a categoria de bug que já foi corrigida duas vezes. Quem tem a
-conexão Discord (hoje só o [Project-ERIS](../Project-ERIS)) importa este
-pacote DIRETO via dependência de path (`uv`, `pyproject.toml` do ERIS), sem
-rede envolvida.
+## Recursos principais
 
-Arquitetura completa e decisões de design em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md).
+- catálogo, coleção, rolls, claims, raridades e pity;
+- personagens duplicadas, afinidade, favoritas e Soulmate;
+- classes de combate, CP e progressão individual;
+- WiShards, Soulstones, XP, loja, itens, fusão e trocas;
+- Party de cinco personagens, Torre e Cidade;
+- batalha 5x5 com aposta e World Boss cooperativo;
+- conquistas e marcos de coleção e progressão.
 
-## A origem do nome
+O PANDORA é um pacote Python usado dentro de um bot. Ele não abre um processo ou uma porta própria, o que mantém as ações do Discord dentro do limite de resposta.
 
-Pandora - a primeira mulher da mitologia grega, que abre a caixa (ou jarra,
-"pithos" no original) proibida e liberta tudo que havia dentro. Referência
-direta a um colecionador de personagens: cada roll é abrir a caixa de novo,
-sem saber o que vai sair.
+## Origem do nome
 
-## Uso
+PANDORA vem de Pandora (Πανδώρα), personagem da mitologia grega ligada ao mito da Caixa de Pandora. Ela recebeu dos deuses um recipiente fechado e, ao abri-lo, libertou o que estava guardado. No fundo permaneceu Elpis, geralmente entendida como a esperança.
 
-Não é um processo standalone - é importado por quem tem a conexão Discord:
+Cada roll segue a mesma ideia: abrir algo sem saber qual personagem será revelada. A relação central é **Pandora → recipiente fechado → abertura → surpresa → gacha**.
+
+A ligação continua depois do roll. A personagem entra na coleção, aumenta o CP, recebe uma classe e pode fortalecer a Party, a Cidade, a Torre, as batalhas e outros sistemas. O ciclo pode ser resumido como **abrir → descobrir → colecionar → desenvolver → usar**. A própria coleção também representa a caixa, pois tudo o que existe dentro dela alimenta o restante do jogo.
+
+### Identidade visual
+
+A logo mostra três cartas com silhuetas de personagens. A carta central recebe destaque com uma personagem coroada, enquanto as silhuetas representam o conteúdo ainda oculto antes da revelação.
+
+As cartas reúnem personagens, raridade, gacha e coleção. O dourado sugere recompensa e raridade; o roxo e o preto dão ao PANDORA uma identidade própria de jogo. A Caixa de Pandora aparece no ato de revelar o conteúdo: **fechado → abrir → descobrir**.
+
+Em uma frase: **PANDORA transforma a curiosidade sobre a próxima abertura em um mundo construído a partir da coleção.**
+
+## Requisitos
+
+- Python 3.11 ou mais recente;
+- um cliente que conecte o pacote ao Discord.
+
+## Instalação e uso
+
+Instale o pacote como dependência local e importe os módulos necessários:
 
 ```python
-from pandora import db, gacha, paineis, consulta, economia, auto_colecionador, sincronizador
+from pandora import db, gacha, paineis
+
+db.inicializar()
 ```
 
-`db.inicializar()` precisa ser chamado 1x no boot de quem importa (cria/
-migra o schema em `data/pandora.db`, mesmo padrão de `eris.db.inicializar()`
-de antes da extração).
+## Integrações com outros projetos
 
-### Migrar de uma instância antiga do Project-ERIS
+- **ERIS:** oferece os comandos, botões e mensagens do Discord usados para jogar.
+- **GAIA:** classifica personagens e cria textos especiais com IA. Quando ela está desligada, o sistema usa respostas simples e mantém as regras do jogo ativas.
 
-Se você tem um `data/eris.db` de antes da extração (2026-08-29), rode:
+Para copiar dados de uma instalação antiga do ERIS:
 
-```bash
-python scripts/migrar_de_eris.py [caminho pro eris.db, opcional - default ../Project-ERIS/data/eris.db]
+```powershell
+python scripts/migrar_de_eris.py
 ```
 
-Copia as 14 tabelas `colecao_*` inteiras (`INSERT OR IGNORE`, seguro rodar
-mais de uma vez) - nunca apaga nada do banco de origem, só lê.
+O script só lê o banco de origem e pode ser executado mais de uma vez.
 
-## Dependências externas
+## Documentação
 
-- **GAIA** (`../Project G.A.I.A`, assistente pessoal do mesmo autor) - webhook
-  reverso (`pandora/gaia_webhook.py`) pra classificar classe/categoria de
-  combate de uma personagem e gerar o conteúdo da Prova de Soulmate via LLM.
-  Se a GAIA não estiver rodando, o Colecionador cai pra classificação/texto
-  genérico - a mecânica em si (rolls/claims/chance/pity) NUNCA depende
-  dessa chamada responder.
+- [Funcionalidades](docs/FUNCIONALIDADES.md)
+- [Arquitetura](docs/ARQUITETURA.md)
+- [Pendências](docs/TODO.md)
+- [Especificações](docs/specs/)
+- [Histórico de versões](CHANGELOG.md)
+- [Padrão de documentação](docs/PADRAO_DOCUMENTACAO.md)
+
+## Situação atual
+
+O pacote está em uso pelo ERIS. As validações pendentes e os próximos ajustes ficam em `docs/TODO.md`.

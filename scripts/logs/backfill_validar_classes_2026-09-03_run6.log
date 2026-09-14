@@ -1,0 +1,6 @@
+[17:45:37] Backup já existe (C:\Workspace\Project-PANDORA\data\pandora_backup_pre_validar_classes_2026-09-03.db) - preservando o snapshot ORIGINAL, não sobrescrevendo.
+[17:45:37] Total a classificar: 4940
+[17:47:50] 8 falhas SEGUIDAS - provável orçamento diário da Groq esgotado de novo. Parando cedo (rode de novo mais tarde).
+[17:47:50] PARADO CEDO: 34 classificadas antes de parar, 8 falha(s) no total.
+[17:47:50] Ainda sem classe no banco (checagem final): 4906
+[17:47:50] Amostra de falhas: Haku; Pyrrha Nikos; Kikuchi Sonoka; Jenny Realight; Kagura Mikazuchi; Flare Corona; Sorano (Angel); Dimaria Yesta

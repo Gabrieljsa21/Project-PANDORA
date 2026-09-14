@@ -26,7 +26,6 @@ um REENCONTRO (quem rolou já é dono - Afinidade sobe, paga na hora) ou um
 roll de personagem de TERCEIRO (o dono de verdade recebe metade do valor,
 sem mudar Afinidade nem dar nada a quem rolou)."""
 import asyncio
-import json
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -56,9 +55,29 @@ LIMITE_TECNICO_EMBEDS_POR_MENSAGEM = 10
 # de cada RATING no momento do roll; aqui é a chance de sortear cada TIER
 # fixo (ver `db._CORTES_RARIDADE`, que distribui o catálogo nessas mesmas
 # proporções na importação). Isso é o formato do catálogo, não dificuldade
-# ajustável por servidor - fica fixo.
+# ajustável por servidor - fica fixo (só o Nível de Progressão da conta
+# desloca uma fração pequena dele, ver `_pesos_raridade_com_bonus`
+# /`db.pontos_bonus_raridade_por_nivel`, 2026-09-06).
 _PESOS_RARIDADE = {1: 50, 2: 30, 3: 15, 4: 4, 5: 1}
 _ESTRELAS = {1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐"}
+
+
+def _pesos_raridade_com_bonus(pontos_bonus):
+    """`_PESOS_RARIDADE` com `pontos_bonus` pontos de peso deslocados do
+    tier 1 (mais comum) pros tiers 4⭐/5⭐ (proporção 4:1 entre eles
+    preservada) - soma dos pesos nunca muda, então `random.choices` nem
+    precisa normalizar diferente. `pontos_bonus=0` (o caso comum, ninguém
+    com Nível de Progressão alto o bastante) devolve o dict original sem
+    alocar cópia à toa."""
+    if not pontos_bonus:
+        return _PESOS_RARIDADE
+    extra_4 = round(pontos_bonus * _PESOS_RARIDADE[4] / (_PESOS_RARIDADE[4] + _PESOS_RARIDADE[5]))
+    extra_5 = pontos_bonus - extra_4
+    pesos = dict(_PESOS_RARIDADE)
+    pesos[1] -= pontos_bonus
+    pesos[4] += extra_4
+    pesos[5] += extra_5
+    return pesos
 
 
 def estrelas_por_raridade(raridade):
@@ -72,43 +91,16 @@ _GENEROS_POR_COMANDO = {
 
 _CORES_RARIDADE = {1: 0x95A5A6, 2: 0x2ECC71, 3: 0x3498DB, 4: 0x9B59B6, 5: 0xF1C40F}
 
-# 🔥 Cor de embed EXCLUSIVA de Soulmate (2026-08-29, Prova de Soulmate) -
-# some por cima da cor por raridade em qualquer card/embed dela (cosmético 1
-# dos 4 fechados na revisão, "equivalente prático de moldura" já que o ERIS
-# usa embed puro, sem asset de imagem renderizada).
+# 🔥 Cor de embed EXCLUSIVA de Soulmate (2026-08-29) - some por cima da cor
+# por raridade em qualquer card/embed dela (cosmético 1 dos 4 fechados na
+# revisão, "equivalente prático de moldura" já que o ERIS usa embed puro,
+# sem asset de imagem renderizada). Usada no fluxo de reencontro
+# (`_resolver_resultado`/`enviar_cards_individuais` abaixo) - a Prova de
+# Soulmate (mini-game antigo que gerava essa cor originalmente) foi REMOVIDA
+# em 2026-09-14 (virou dead code depois que Afinidade máxima passou a virar
+# Soulmate automaticamente, sem precisar de trial), mas a cor cosmética
+# continua em uso.
 _COR_SOULMATE = 0xFF69B4
-
-# 🔥 Chance/pity da Prova de Soulmate POR RARIDADE (2026-08-29,
-# ERIS_power_afinidade_soulmate_niveis.md, números validados numa revisão do
-# usuário sobre uma proposta do GPT) - "chance" é a chance INICIAL (1ª
-# tentativa), "incremento" soma a cada FALHA (chance = inicial +
-# incremento × tentativas_ja_feitas), "pity" é a tentativa em que o sucesso
-# vira GARANTIDO por um branch explícito (`tentar_prova_soulmate`) - o pity
-# NÃO emerge sozinho da matemática (ex.: 5⭐ na tentativa 20 dá só 79%, não
-# 100%), é uma rede de segurança contra azar extremo, não o caminho normal
-# (a média esperada de tentativas fica entre ~2 pra 1⭐ e ~6,2 pra 5⭐).
-_PROVA_SOULMATE_POR_RARIDADE = {
-    1: {"chance": 0.35, "incremento": 0.15, "pity": 5},
-    2: {"chance": 0.25, "incremento": 0.10, "pity": 7},
-    3: {"chance": 0.15, "incremento": 0.07, "pity": 10},
-    4: {"chance": 0.08, "incremento": 0.05, "pity": 14},
-    5: {"chance": 0.03, "incremento": 0.04, "pity": 20},
-}
-
-# 🔥 Cooldown fixo da Prova (Seção 8 do documento original, mantido) - 1
-# tentativa por HORA, por personagem (não é configurável por servidor, é
-# uma regra de balanceamento da mecânica em si, diferente da dificuldade de
-# roll/claim que É configurável).
-_PROVA_SOULMATE_COOLDOWN_MINUTOS = 60
-
-# 🔥 Bônus de chance por escolher a resposta "certa" na situação da Prova
-# (2026-08-29, redesenho pedido pelo usuário via GPT depois de testar ao
-# vivo: "acertar não garante Soulmate, mas melhora a chance daquela
-# tentativa") - FIXO (não escala por raridade, de propósito - simplicidade
-# antes de generalizar sem necessidade concreta), aplicado SÓ na tentativa
-# atual (nunca persistido/somado à progressão base de `_PROVA_SOULMATE_
-# POR_RARIDADE`) - escolher errado não penaliza, só não dá o bônus.
-_BONUS_ESCOLHA_CORRETA_PROVA_SOULMATE = 0.10
 
 # 🔥 Cor do botão de claim condizendo com a raridade (2026-08-29, pedido do
 # usuário) - o Discord só tem 4 estilos fixos de botão (blurple/cinza/verde/
@@ -142,16 +134,17 @@ _ESTILO_BOTAO_RARIDADE = {
 }
 
 
-def _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_minima=None):
-    """Sorteia o TIER primeiro (pesos fixos), depois um personagem dentro
-    dele - se o tier sorteado não tiver candidato elegível (catálogo pequeno
-    demais), cai pro próximo tier mais comum disponível (mesmo espírito do
-    `fallbackPool()` do Fable). `raridade_minima` (Guaranteed Roll comprado
-    na loja, ver `db.consumir_garantia`) restringe o sorteio do TIER aos
-    tiers >= esse valor - se nenhum deles tiver candidato (catálogo raro
-    demais pro filtro atual), cai pro sorteio normal sem garantia em vez de
-    devolver vazio (proteção contra um Guaranteed Roll comprado virar
-    "nada aconteceu")."""
+def _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_minima=None, pontos_bonus_raridade=0):
+    """Sorteia o TIER primeiro (pesos fixos, ou levemente deslocados por
+    `pontos_bonus_raridade` - ver `_pesos_raridade_com_bonus`), depois um
+    personagem dentro dele - se o tier sorteado não tiver candidato
+    elegível (catálogo pequeno demais), cai pro próximo tier mais comum
+    disponível (mesmo espírito do `fallbackPool()` do Fable). `raridade_
+    minima` (Guaranteed Roll comprado na loja, ver `db.consumir_garantia`)
+    restringe o sorteio do TIER aos tiers >= esse valor - se nenhum deles
+    tiver candidato (catálogo raro demais pro filtro atual), cai pro
+    sorteio normal sem garantia em vez de devolver vazio (proteção contra
+    um Guaranteed Roll comprado virar "nada aconteceu")."""
     tiers_por_frequencia = sorted(_PESOS_RARIDADE, key=lambda t: _PESOS_RARIDADE[t], reverse=True)
 
     if raridade_minima:
@@ -162,7 +155,8 @@ def _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_
                 return random.choice(candidatos)
         # nenhum tier >= raridade_minima tinha candidato - cai pro sorteio normal
 
-    tier_sorteado = random.choices(list(_PESOS_RARIDADE.keys()), weights=list(_PESOS_RARIDADE.values()), k=1)[0]
+    pesos = _pesos_raridade_com_bonus(pontos_bonus_raridade)
+    tier_sorteado = random.choices(list(pesos.keys()), weights=list(pesos.values()), k=1)[0]
     ordem_fallback = [tier_sorteado] + [t for t in tiers_por_frequencia if t != tier_sorteado]
     for tier in ordem_fallback:
         candidatos = db.candidatos_por_raridade(guild_id, tier, generos, permitir_nsfw)
@@ -171,27 +165,25 @@ def _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_
     return None
 
 
-def _sortear_um(guild_id, user_id, generos, permitir_nsfw, chance_wish_roll, raridade_minima=None):
-    """Sorteia UM personagem (wish-roll ou raridade normal/garantida) - já
-    pressupõe que o cooldown de roll já foi consumido por quem chamou (ver
-    `rolar_varios`, que consome o LOTE inteiro de uma vez, não um por um).
-    `raridade_minima` (Guaranteed Roll) PULA o wish-roll - uma garantia paga
-    de verdade não deveria virar uma personagem da wishlist de raridade
-    baixa só por sorte.
+def _sortear_um(guild_id, user_id, generos, permitir_nsfw, chance_wish_roll, raridade_minima=None, pontos_bonus_raridade=0):
+    """Sorteia raridade primeiro; a Wishlist só escolhe dentro desse tier.
 
-    🔥 Fonte por baixo virou `colecao_favoritas` (2026-09-03, fusão
-    Wishlist+Favoritos - "vamos unir tudo em Wishlist... vc ta mantendo o
-    nome das funcoes relacionadas a essa uniao como wishlist?") - mesmo
-    mecanismo de bias de antes, `db.wishlist_disponiveis_no_guild` (nome
-    da função preservado, só a tabela por baixo mudou), mesmo filtro
-    "ainda sem dono nesse servidor"."""
-    if raridade_minima is None and random.random() < chance_wish_roll:
-        disponiveis = db.wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw)
+    Assim, a chance de Wishlist define *qual* personagem aparece, jamais
+    altera a probabilidade de 5★ (inclusive em rolls garantidos).
+
+    A lista ilimitada de Favoritos é apenas pessoal. Os alvos vêm dos
+    slots de Wishlist, ainda sem dono neste servidor."""
+    personagem_id = _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_minima, pontos_bonus_raridade)
+    personagem = db.personagem_por_id(personagem_id) if personagem_id is not None else None
+    if personagem is None:
+        return None
+    bonus_torre = db.beneficios_wishlist_torre(guild_id, user_id)["bonus_chance"]
+    chance_final_wishlist = min(1.0, chance_wish_roll + bonus_torre)
+    if random.random() < chance_final_wishlist:
+        disponiveis = db.wishlist_slots_disponiveis_no_guild(guild_id, user_id, permitir_nsfw, personagem["raridade"])
         if disponiveis:
             return db.personagem_por_id(random.choice(disponiveis))
-
-    personagem_id = _sortear_raridade_com_candidatos(guild_id, generos, permitir_nsfw, raridade_minima)
-    return db.personagem_por_id(personagem_id) if personagem_id is not None else None
+    return personagem
 
 
 def _resolver_resultado(guild_id, user_id, personagem):
@@ -264,31 +256,19 @@ def _resolver_resultado(guild_id, user_id, personagem):
 
 
 def _limite_rolls_atual(guild_id, user_id, config=None):
-    """Quantos rolls o servidor + upgrade permanente da pessoa somam nesse
-    ciclo - extraído (2026-08-29) pra ser reaproveitado por `rolar_varios`
-    E por `enviar_resultados` (mostra "Puxada N/limite" no rodapé do card,
-    pedido do usuário: "é p ser o numero q aquele roll representa dentre o
-    limite atual do usuario ex 13/50"), sem duplicar a conta em 2
-    lugares."""
+    """Rolls do servidor + Progressão + bônus permanentes especiais."""
     config = config or db.obter_configuracao_colecao(guild_id)
-    # 🔥 Roll Permanente (2026-09-01, drop raro do World Boss OU compra na
-    # Loja - contados SEPARADOS entre si, `db.bonus_permanente_total` soma
-    # os 2) - bônus SEPARADO do upgrade pago acima, mas soma junto.
     bonus_rolls, _bonus_claims = db.bonus_permanente_total(guild_id, user_id)
-    return config["rolls_por_ciclo"] + db.nivel_upgrade_rolls(guild_id, user_id) * db.BONUS_ROLLS_POR_NIVEL + bonus_rolls
+    bonus_progressao_rolls, _bonus_progressao_claims = db.bonus_acoes_por_progressao(guild_id, user_id, config)
+    return config["rolls_por_ciclo"] + bonus_progressao_rolls + bonus_rolls
 
 
 def _limite_claims_atual(guild_id, user_id, config=None):
-    """Quantos claims o servidor + upgrade permanente da pessoa somam
-    nesse ciclo - espelha `_limite_rolls_atual` (mesmo motivo: extraído
-    pra nunca duplicar essa conta em 2 lugares). 2026-09-04, pedido do
-    usuário: "A ideia é consumir todos os claim q tem disponivel" - usado
-    pela Auto-coleta (`pandora.auto_colecionador.AutoColecionadorUsuarios`)
-    pra saber quantos claims reivindicar automaticamente por ciclo, em vez
-    do "sempre só 1" de antes."""
+    """Claims do servidor + Progressão + bônus permanentes especiais."""
     config = config or db.obter_configuracao_colecao(guild_id)
     _bonus_rolls, bonus_claims = db.bonus_permanente_total(guild_id, user_id)
-    return config["claims_por_ciclo"] + db.nivel_upgrade_claims(guild_id, user_id) * db.BONUS_CLAIMS_POR_NIVEL + bonus_claims
+    _bonus_progressao_rolls, bonus_progressao_claims = db.bonus_acoes_por_progressao(guild_id, user_id, config)
+    return config["claims_por_ciclo"] + bonus_progressao_claims + bonus_claims
 
 
 def rolar_varios(guild_id, user_id, comando, quantidade=1):
@@ -331,11 +311,17 @@ def rolar_varios(guild_id, user_id, comando, quantidade=1):
     # personagem sorteada nesse comando (mesmo numa puxada de várias); o
     # resto do lote segue o sorteio ponderado normal.
     raridade_minima = db.consumir_garantia(guild_id, user_id)
+    # 🔥 Bônus de Nível de Progressão nas odds de raridade (2026-09-06,
+    # pedido do usuário: "acho interessante se o Nivel de Progressao da
+    # conta tivesse mais influencia em tudo... ate rolls") - calculado 1x
+    # fora do loop (nunca por roll individual do lote).
+    pontos_bonus_raridade = db.pontos_bonus_raridade_por_nivel(db.progressao_conta(guild_id, user_id)["nivel"])
     resultados = []
     for indice in range(consumidos):
         personagem = _sortear_um(
             guild_id, user_id, generos, config["nsfw_permitido"], config["chance_wish_roll"],
             raridade_minima=raridade_minima if indice == 0 else None,
+            pontos_bonus_raridade=pontos_bonus_raridade,
         )
         if personagem is not None:
             resultados.append(_resolver_resultado(guild_id, user_id, personagem))
@@ -513,10 +499,16 @@ async def revelar_classe(personagem):
     # 🔥 `definir_classe_personagem` devolve a categoria REALMENTE gravada
     # (a canônica de `colecao_classes`, se a classe já existia - nunca a
     # sugestão crua da GAIA pra este personagem específico).
-    categoria_combate = await asyncio.to_thread(
+    recusado, categoria_combate = await asyncio.to_thread(
         db.definir_classe_personagem, personagem["id"], classe, resultado.get("categoria_combate"), classe_exibicao,
         resultado.get("funcao_cidade"),
     )
+    # 🔥 "Apoiador" aposentado (2026-09-06) - `definir_classe_personagem`
+    # recusa gravar e devolve `recusado=True`; trata IGUAL a "GAIA não
+    # decidiu nada" (mesmo branch de `if not classe` acima) - a personagem
+    # continua sem classe, pendente pra próxima tentativa.
+    if recusado:
+        return None, None
     personagem["classe"] = classe
     personagem["classe_exibicao"] = classe_exibicao
     return classe_exibicao, categoria_combate
@@ -555,16 +547,7 @@ def _processar_claim_economia(guild_id, personagem, user):
     propósito (nenhuma chamada de rede aqui dentro), quem chama de dentro
     de uma interação do Discord deve rodar em `asyncio.to_thread`."""
     config = db.obter_configuracao_colecao(guild_id)
-    # 🔥 Upgrade permanente de claims (Seção 11, pago na loja, 2026-08-29 -
-    # mesmo bônus PESSOAL somado em cima da config do SERVIDOR que já
-    # existia pra rolls) - nunca substitui a config do servidor, só soma.
-    # 🔥 Claim Permanente (2026-09-01, drop raro do World Boss OU compra na
-    # Loja - contados separados entre si, `db.bonus_permanente_total` soma
-    # os 2) - bônus SEPARADO do upgrade pago acima, soma junto.
-    _bonus_rolls, bonus_claims = db.bonus_permanente_total(guild_id, user.id)
-    limite_claims = (
-        config["claims_por_ciclo"] + db.nivel_upgrade_claims(guild_id, user.id) * db.BONUS_CLAIMS_POR_NIVEL + bonus_claims
-    )
+    limite_claims = _limite_claims_atual(guild_id, user.id, config)
     if db.claims_disponiveis(guild_id, user.id, limite_claims, config["ciclo_claims_minutos"]) <= 0:
         segundos = db.tempo_restante(
             guild_id, user.id, "claims_restantes", "claims_resetam_em",
@@ -582,13 +565,15 @@ def _processar_claim_economia(guild_id, personagem, user):
     # colecao_wishards.md Seções 4/7) - sempre feito ANTES do ack visual,
     # pra nunca existir um instante em que o claim "ganhou" mas ainda não
     # pagou nada.
-    recompensa = db.valor_base_wishards(personagem["raridade"])
+    bonus_loot = db.bonus_loot_colecao(guild_id, user.id)
+    recompensa = round(db.valor_base_wishards(personagem["raridade"]) * (1 + bonus_loot))
     novo_saldo = db.creditar_wishards(guild_id, user.id, recompensa, "claim", personagem["nome"], str(personagem["id"]))
     db.definir_afinidade_inicial(guild_id, user.id, personagem["id"])
     # 🔥 XP de Progressão (2026-08-30, análise do usuário Seção 4: "obter
     # personagens novas" é uma das fontes) + marcos de coleção única
     # (Seção 11) - checados JUNTO do claim, nunca em lote separado.
-    db.creditar_xp_progressao(guild_id, user.id, personagem["raridade"] * 15)
+    xp_claim = round(personagem["raridade"] * 15 * (1 + bonus_loot))
+    db.creditar_xp_progressao(guild_id, user.id, xp_claim, "claim", personagem["nome"], str(personagem["id"]))
     db.checar_marcos_colecao(guild_id, user.id)
     # 🔥 REMOVIDO (2026-09-01, achado do usuário: "os botões de claim,
     # tanto por botão qnt emoji, estão parando de responder ou demorando")
@@ -652,7 +637,7 @@ async def _claim_sem_cooldown(guild_id, personagem_id, user, origem_wishards):
     recompensa = db.valor_base_wishards(personagem["raridade"])
     novo_saldo = db.creditar_wishards(guild_id, user.id, recompensa, origem_wishards, personagem["nome"], str(personagem_id))
     db.definir_afinidade_inicial(guild_id, user.id, personagem_id)
-    db.creditar_xp_progressao(guild_id, user.id, personagem["raridade"] * 15)
+    db.creditar_xp_progressao(guild_id, user.id, personagem["raridade"] * 15, origem_wishards, personagem["nome"], str(personagem_id))
     db.checar_marcos_colecao(guild_id, user.id)
 
     classe, categoria_combate = await revelar_classe(personagem)
@@ -704,135 +689,6 @@ async def comprar_com_revelacao(guild_id, personagem_id, user):
     personagem = await asyncio.to_thread(db.personagem_por_id, personagem_id)
     await revelar_classe(personagem)
     return ok, mensagem, bool(personagem.get("classe"))
-
-
-def regra_prova_soulmate(raridade):
-    """Regra (chance inicial/incremento/pity) da Prova de Soulmate pra uma
-    raridade - exposta pra UI (`paineis.py`) montar o embed de contexto sem
-    acessar `_PROVA_SOULMATE_POR_RARIDADE` diretamente."""
-    return _PROVA_SOULMATE_POR_RARIDADE[raridade]
-
-
-_CAMPOS_TEXTO_PROVA_SOULMATE = (
-    "prova_soulmate_nome", "prova_soulmate_descricao", "prova_soulmate_situacao",
-    "prova_soulmate_reacao_acerto", "prova_soulmate_reacao_erro",
-    "prova_soulmate_derrota", "prova_soulmate_vitoria",
-)
-
-# 🔥 Opções genéricas de fallback (2026-08-29) - usadas só se a GAIA nunca
-# respondeu (fora do ar) E a personagem ainda não tem nada cacheado. Opção
-# índice 1 (a empática/calma) é a "certa" por padrão - mesmo espírito de
-# `_normalizar_opcoes_prova_soulmate` do lado da GAIA, um fallback SEMPRE
-# precisa de exatamente 1 opção certa, nunca ambíguo.
-_OPCOES_GENERICAS_PROVA_SOULMATE = [
-    {"texto": "Diga que ela devia ser mais forte sozinha.", "correta": False},
-    {"texto": "Pergunte com calma se ela está bem.", "correta": True},
-    {"texto": "Ignore e continue com o que estava fazendo.", "correta": False},
-]
-
-
-async def obter_textos_prova_soulmate(personagem):
-    """Conteúdo da Prova de Soulmate (nome/descrição/situação/opções de
-    resposta/reações/derrota/vitória), gerado 1x pela GAIA (LLM) na 1ª vez
-    que a personagem chega em Afinidade 10 em QUALQUER servidor, e cacheado
-    pra sempre (mesmo padrão de `revelar_classe` acima). Se a LLM nunca
-    respondeu (GAIA fora do ar), cai pra um texto GENÉRICO baseado no nome -
-    a mecânica (chance/pity/bônus de escolha) NUNCA depende da LLM
-    responder, só a ambientação fica mais simples nesse caso.
-
-    🔥 Cache-check por `prova_soulmate_opcoes` (2026-08-29, não mais por
-    `prova_soulmate_nome`) - o redesenho da Prova (situação+3 opções em vez
-    de intro solto) adicionou esse campo; checar `opcoes` faz uma
-    personagem testada ANTES do redesenho (nome preenchido, opcoes NULA)
-    se auto-curar sozinha, regenerando com o formato novo na próxima vez
-    que alguém abrir a Prova dela - sem precisar de UPDATE manual no banco."""
-    if personagem.get("prova_soulmate_opcoes"):
-        opcoes = personagem["prova_soulmate_opcoes"]
-        if isinstance(opcoes, str):
-            opcoes = json.loads(opcoes)
-        return {
-            **{campo: personagem.get(campo) for campo in _CAMPOS_TEXTO_PROVA_SOULMATE},
-            "prova_soulmate_opcoes": opcoes,
-        }
-    resultado = await asyncio.to_thread(
-        gaia_webhook.pedir_prova_soulmate,
-        personagem["nome"], personagem.get("descricao"), personagem.get("serie"), personagem["genero"],
-    )
-    if resultado.get("prova_soulmate_nome") and resultado.get("prova_soulmate_opcoes"):
-        opcoes_json = json.dumps(resultado["prova_soulmate_opcoes"], ensure_ascii=False)
-        await asyncio.to_thread(
-            db.definir_textos_prova_soulmate, personagem["id"],
-            resultado["prova_soulmate_nome"], resultado.get("prova_soulmate_descricao"),
-            resultado.get("prova_soulmate_situacao"), opcoes_json,
-            resultado.get("prova_soulmate_reacao_acerto"), resultado.get("prova_soulmate_reacao_erro"),
-            resultado.get("prova_soulmate_derrota"), resultado.get("prova_soulmate_vitoria"),
-        )
-        personagem.update(resultado)
-        personagem["prova_soulmate_opcoes"] = opcoes_json
-        return resultado
-    return {
-        "prova_soulmate_nome": f"Prova de {personagem['nome']}",
-        "prova_soulmate_descricao": f"Prove que é digno de se tornar Soulmate de {personagem['nome']}.",
-        "prova_soulmate_situacao": f"{personagem['nome']} observa você em silêncio, avaliando se você está à altura.",
-        "prova_soulmate_opcoes": list(_OPCOES_GENERICAS_PROVA_SOULMATE),
-        "prova_soulmate_reacao_acerto": f"{personagem['nome']} parece um pouco mais confortável com sua presença.",
-        "prova_soulmate_reacao_erro": f"{personagem['nome']} hesita diante da sua resposta.",
-        "prova_soulmate_derrota": "Talvez... possamos tentar de novo mais tarde.",
-        "prova_soulmate_vitoria": "Você me provou seu valor. A partir de agora, somos Soulmates.",
-    }
-
-
-async def tentar_prova_soulmate(guild_id, user_id, personagem_id, user, bonus_escolha=0.0):
-    """Núcleo da Prova de Soulmate (2026-08-29, ERIS_power_afinidade_
-    soulmate_niveis.md) - valida dono + Afinidade 10 + ainda não é Soulmate
-    + cooldown de 1h/personagem; sorteia com chance crescente por falha
-    (`_PROVA_SOULMATE_POR_RARIDADE`) + `bonus_escolha` (0.0 ou
-    `_BONUS_ESCOLHA_CORRETA_PROVA_SOULMATE`, decidido por `paineis.py` a
-    partir da resposta escolhida na situação - aplicado SÓ nesta tentativa,
-    nunca persistido), com um branch de PITY EXPLÍCITO (garante sucesso na
-    tentativa N, ignora `bonus_escolha` - nunca confia só na % chegar em
-    100 sozinha, ver comentário da tabela acima). Devolve (ok, erro_ou_None,
-    contexto_ou_None) - `contexto` é o que `paineis.py` precisa pra montar o
-    embed de resultado (personagem, venceu, tentativa_atual, chance_usada,
-    textos)."""
-    if str(db.dono_do_personagem(guild_id, personagem_id)) != str(user_id):
-        return False, "Essa personagem não é sua.", None
-    personagem = db.personagem_por_id(personagem_id)
-    if personagem is None:
-        return False, "Não achei essa personagem.", None
-    if db.afinidade(guild_id, user_id, personagem_id) < 10:
-        return False, f"{personagem['nome']} ainda não chegou em Afinidade 10.", None
-    if db.is_soulmate(guild_id, user_id, personagem_id):
-        return False, f"{personagem['nome']} já é sua Soulmate.", None
-
-    prontas = {p["id"]: p for p in await asyncio.to_thread(db.personagens_prontas_para_prova, guild_id, user_id)}
-    estado = prontas.get(personagem_id)
-    tentativas_feitas = estado["soulmate_tentativas"] if estado else 0
-    ultima_tentativa = estado["soulmate_ultima_tentativa_em"] if estado else None
-    if ultima_tentativa:
-        proxima = datetime.fromisoformat(ultima_tentativa) + timedelta(minutes=_PROVA_SOULMATE_COOLDOWN_MINUTOS)
-        agora = datetime.now(timezone.utc)
-        if agora < proxima:
-            minutos = max(1, int((proxima - agora).total_seconds() // 60))
-            return False, f"Você já tentou a Prova de {personagem['nome']} recentemente - tenta de novo em ~{minutos} min.", None
-
-    regra = _PROVA_SOULMATE_POR_RARIDADE[personagem["raridade"]]
-    tentativa_atual = tentativas_feitas + 1
-    chance_base = min(1.0, regra["chance"] + regra["incremento"] * tentativas_feitas)
-    chance_usada = min(1.0, chance_base + bonus_escolha)
-    pity_forcado = tentativa_atual >= regra["pity"]
-    venceu = pity_forcado or random.random() < chance_usada
-
-    agora_iso = datetime.now(timezone.utc).isoformat()
-    await asyncio.to_thread(db.registrar_tentativa_soulmate, guild_id, user_id, personagem_id, venceu, agora_iso)
-    textos = await obter_textos_prova_soulmate(personagem)
-
-    contexto = {
-        "personagem": personagem, "venceu": venceu, "pity_forcado": pity_forcado,
-        "tentativa_atual": tentativa_atual, "pity_maximo": regra["pity"], "chance_usada": chance_usada,
-        "textos": textos,
-    }
-    return True, None, contexto
 
 
 async def enviar_cards_individuais(canal, guild_id, resultados, indice_inicial=0, total_ciclo=None):
@@ -1247,7 +1103,7 @@ class ViewClaimPendentes(discord.ui.View):
     um roll anterior (qualquer lote, humano ou auto-colecionador)."""
 
     def __init__(self, guild_id, itens):
-        super().__init__(timeout=300)
+        super().__init__(timeout=900)
         self.guild_id = guild_id
         self._itens = itens
         for indice, (message_id, personagem) in enumerate(itens):

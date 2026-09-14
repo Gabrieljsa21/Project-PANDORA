@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Séries Favoritas (2026-09-02, pedido do usuário depois do redesenho do
 `/perfil`) - até `SLOTS_MAXIMO` séries/franquias escolhidas pelo jogador (5
-slots base, mais compráveis na Loja via `db.comprar_slot_serie_favorita`),
+slots base e os demais desbloqueados pela Torre, na mesma progressão da
+Wishlist),
 cada uma com 4 marcos (Coleção Completa/Maestria Completa/Afinidade
 Completa/Soulbond Completo), cada marco dando um bônus de CP que só afeta
 personagens DAQUELA série (nunca CP global - "isso inevitavelmente vira
@@ -38,11 +39,17 @@ BONUS_SOULBOND_COMPLETO = 0.05
 
 
 def slots_disponiveis(guild_id, user_id):
-    return db.SLOTS_BASE_SERIE_FAVORITA + db.nivel_upgrade_slots_serie_favorita(guild_id, user_id)
+    """Séries e Wishlist compartilham a progressão da Torre.
+
+    Compras antigas são preservadas durante a migração, mas novos slots não
+    são mais compráveis.
+    """
+    legado = db.SLOTS_BASE_SERIE_FAVORITA + db.nivel_upgrade_slots_serie_favorita(guild_id, user_id)
+    return max(db.beneficios_wishlist_torre(guild_id, user_id)["slots"], legado)
 
 
 def listar(guild_id, user_id):
-    """Todos os slots DISPONÍVEIS pro jogador (base + comprados), cada um
+    """Todos os slots DISPONÍVEIS pro jogador (base + Torre), cada um
     com o que está dentro (ou `None`, vazio) e as estatísticas de
     completude quando ocupado - devolve `[{"slot", "serie", "bloqueado_ate",
     "possuidas", "total_catalogo", "colecao_completa", "nivel_maximo",

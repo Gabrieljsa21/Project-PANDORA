@@ -43,9 +43,20 @@ RECOMPENSA_WISHARDS_VITORIA = 500
 RECOMPENSA_XP_VITORIA = 200
 RECOMPENSA_SOULSTONE_VITORIA = 20
 
+
+def _config_worldboss(guild_id):
+    return db.obter_configuracao_colecao(guild_id)
+
+
+def _horarios_configurados(config):
+    try:
+        return {hora for hora in (int(valor.strip()) for valor in config["worldboss_horarios"].split(",")) if 0 <= hora <= 23}
+    except (AttributeError, ValueError):
+        return set(HORARIOS_APARICAO)
+
 # 🔥 Valores-base do TIME (Seção 14) recalibrados (2026-09-02) - os
 # originais matavam qualquer time no turno 1 (HP_BASE menor que o ATK de
-# QUALQUER Boss do catálogo - achado em produção, ver TODO.md). Novo
+# QUALQUER Boss do catálogo - achado em produção, ver docs/TODO.md). Novo
 # princípio, pedido do usuário: o time real observado (3 jogadores, CP
 # ~26.297/categoria) deve ter uma "chance boa de vencer", diminuindo por
 # dificuldade - o HP/ATK de cada Boss no catálogo continua quase igual
@@ -74,7 +85,7 @@ VARIACAO_TURNO = 0.10
 # deles é a MÉDIA dos participantes humanos (2026-09-01, pedido direto do
 # usuário - "o CP dos bots vai ser a media dos players participante"), não
 # uma personagem real (o ERIS só tem 1 conta de bot acessível a partir da
-# instância que roda este scheduler - ver ARQUITETURA.md). `user_id`
+# instância que roda este scheduler - ver docs/ARQUITETURA.md). `user_id`
 # sintético, nunca colide com um snowflake real do Discord.
 BOT_SLOTS = ("bot:1", "bot:2")
 
@@ -286,7 +297,7 @@ def iniciar_evento(guild_id, canal_id):
     hp = dados["hp"] * mult
     atk = dados["atk"] * mult
     agora = datetime.now(timezone.utc)
-    inscricoes_fecham_em = (agora + timedelta(minutes=DURACAO_INSCRICAO_MINUTOS)).isoformat()
+    inscricoes_fecham_em = (agora + timedelta(minutes=_config_worldboss(guild_id)["worldboss_inscricao_minutos"])).isoformat()
     estado_mecanica = _estado_inicial_mecanica(boss_tipo)
     return db.worldboss_criar_evento(
         guild_id, canal_id, boss_tipo, hp, atk, estado_mecanica, inscricoes_fecham_em,
@@ -384,7 +395,7 @@ def _conquistas_situacionais(evento, resultado_time):
     fracao_hp_final = (evento["time_hp_atual"] / evento["time_hp_maximo"]) if evento["time_hp_maximo"] else 0.0
     total_cp = sum(resultado_time["soma_cp"].values())
     fracao_dps = (resultado_time["soma_cp"]["DPS"] / total_cp) if total_cp else 0.0
-    if evento["turno_atual"] >= LIMITE_TURNOS:
+    if evento["turno_atual"] >= _config_worldboss(evento["guild_id"])["worldboss_limite_turnos"]:
         candidatas.append("wb_ultimo_segundo")
     if fracao_hp_final < 0.05:
         candidatas.append("wb_por_um_fio")
@@ -448,16 +459,16 @@ def fechar_inscricoes(evento_id):
     estado_mecanica = json.loads(evento["estado_mecanica"])
     if CATALOGO_BOSSES[evento["boss_tipo"]]["mecanica"] == "adaptacao":
         estado_mecanica["categoria_dominante"] = categoria_dominante(resultado_time["soma_cp"])
-    proximo_turno_em = (datetime.now(timezone.utc) + timedelta(seconds=DURACAO_TURNO_SEGUNDOS)).isoformat()
+    proximo_turno_em = (datetime.now(timezone.utc) + timedelta(seconds=_config_worldboss(guild_id)["worldboss_turno_segundos"])).isoformat()
     db.worldboss_iniciar_combate(
         evento_id, resultado_time["hp"], resultado_time["dano"], resultado_time["cura"], estado_mecanica, proximo_turno_em,
     )
     return True, None
 
 
-def _montar_resultado(estado, boss_hp, boss_atk, time_hp, turno, linhas, resultado):
+def _montar_resultado(guild_id, estado, boss_hp, boss_atk, time_hp, turno, linhas, resultado):
     terminou = resultado is not None
-    proximo_turno_em = None if terminou else (datetime.now(timezone.utc) + timedelta(seconds=DURACAO_TURNO_SEGUNDOS)).isoformat()
+    proximo_turno_em = None if terminou else (datetime.now(timezone.utc) + timedelta(seconds=_config_worldboss(guild_id)["worldboss_turno_segundos"])).isoformat()
     novo_estado = {
         "turno_atual": turno, "boss_hp_atual": max(0.0, boss_hp), "boss_atk_atual": boss_atk,
         "time_hp_atual": max(0.0, time_hp), "estado_mecanica": estado, "proximo_turno_em": proximo_turno_em,
@@ -501,7 +512,7 @@ def executar_turno(evento):
         time_hp = max(0.0, time_hp - dano_ceifar)
         linhas.append(f"☠️ CEIFAR! O grupo perde {dano_ceifar:.0f} HP direto")
         if time_hp <= 0:
-            return _montar_resultado(estado, boss_hp, boss_atk, time_hp, turno, linhas, "derrota")
+            return _montar_resultado(evento["guild_id"], estado, boss_hp, boss_atk, time_hp, turno, linhas, "derrota")
 
     # --- Passo 2/3: time ataca, boss recebe dano ---
     dano = dano_base * random.uniform(1 - VARIACAO_TURNO, 1 + VARIACAO_TURNO)
@@ -542,7 +553,7 @@ def executar_turno(evento):
                 boss_atk = evento["boss_atk_base"] * 1.40
                 linhas.append(f"🔥 Segundo Renascimento! HP: {boss_hp:.0f} · ATK: {boss_atk:.0f}")
         else:
-            return _montar_resultado(estado, 0.0, boss_atk, time_hp, turno, linhas, "vitoria")
+            return _montar_resultado(evento["guild_id"], estado, 0.0, boss_atk, time_hp, turno, linhas, "vitoria")
 
     # --- Passo 4/5/6 (Seção 18): boss ataca, cura é calculada, e só ENTÃO o
     # HP do time muda por um dano líquido (dano causado pelo Boss - dano
@@ -598,7 +609,7 @@ def executar_turno(evento):
     time_hp = max(0.0, min(teto_hp, time_hp - dano_liquido))
 
     if time_hp <= 0:
-        return _montar_resultado(estado, boss_hp, boss_atk, 0.0, turno, linhas, "derrota")
+        return _montar_resultado(evento["guild_id"], estado, boss_hp, boss_atk, 0.0, turno, linhas, "derrota")
 
     # --- Passo 7: pós-turno (mudanças persistentes/periódicas) ---
     if mecanica == "enfurecer":
@@ -622,9 +633,9 @@ def executar_turno(evento):
             estado["roxa_viva"] = False
             linhas.append("💜 Cabeça Roxa destruída!")
 
-    if turno >= LIMITE_TURNOS:
-        return _montar_resultado(estado, boss_hp, boss_atk, time_hp, turno, linhas, "expirado_por_turnos")
-    return _montar_resultado(estado, boss_hp, boss_atk, time_hp, turno, linhas, None)
+    if turno >= _config_worldboss(evento["guild_id"])["worldboss_limite_turnos"]:
+        return _montar_resultado(evento["guild_id"], estado, boss_hp, boss_atk, time_hp, turno, linhas, "expirado_por_turnos")
+    return _montar_resultado(evento["guild_id"], estado, boss_hp, boss_atk, time_hp, turno, linhas, None)
 
 
 # ==========================================================================
@@ -654,7 +665,7 @@ def embed_aparicao(evento):
     dados = CATALOGO_BOSSES[evento["boss_tipo"]]
     embed = discord.Embed(
         title=f"{dados['nome']} apareceu!",
-        description=f"Inscrições abertas por {DURACAO_INSCRICAO_MINUTOS} minutos - escolha sua categoria em `/pandora` -> 🐉 World Boss.",
+        description=f"Inscrições abertas por {_config_worldboss(evento['guild_id'])['worldboss_inscricao_minutos']} minutos - escolha sua categoria em `/pandora` -> 🐉 World Boss.",
         color=0xC0392B,
     )
     embed.add_field(name="❤️ HP", value=_fmt(evento["boss_hp_maximo"]), inline=True)
@@ -780,10 +791,13 @@ class SchedulerWorldBoss:
 
     async def _checar_spawn(self):
         agora = datetime.now(FUSO_BRASILIA)
-        if agora.minute != 0 or agora.hour not in HORARIOS_APARICAO:
+        if agora.minute != 0:
             return
         marca = (agora.year, agora.month, agora.day, agora.hour)
         for guild in list(self.client.guilds):
+            config = await asyncio.to_thread(db.obter_configuracao_colecao, guild.id)
+            if not config["worldboss_ativo"] or agora.hour not in _horarios_configurados(config):
+                continue
             if self._ultimo_spawn_por_guild.get(guild.id) == marca:
                 continue
             self._ultimo_spawn_por_guild[guild.id] = marca
@@ -896,6 +910,16 @@ class SchedulerWorldBoss:
             ok, _erro, _embed = await gacha._claim_sem_cooldown(guild_id, personagem_id, membro, "worldboss_recompensa")
             if not ok:
                 return None, None
+            # 🔥 2026-09-06, bug achado pelo usuário ("personagem dada por
+            # recompensa de world boss... vindo sem classe definida") -
+            # `_claim_sem_cooldown` revela a classe numa cópia PRÓPRIA do
+            # personagem (busca de novo por `personagem_id` - `gacha.py`),
+            # nunca no dict `personagem` capturado aqui em cima (antes do
+            # claim). O card em `_processar_recompensas_e_anunciar`
+            # (`consulta.embed_carta_personagem`) usava esse dict velho, sem
+            # classe, mesmo com a classe já gravada no banco - relê aqui pra
+            # devolver o estado atualizado.
+            personagem = await asyncio.to_thread(db.personagem_por_id, personagem_id)
             return f"⭐ **{personagem['nome']}** (nova!)", personagem
         # 🔥 reencontro/reencontro_soulmate/reencontro_copia - já creditado
         # dentro de `_resolver_resultado` (Afinidade/WiShards/Soulstone),
@@ -929,14 +953,25 @@ class SchedulerWorldBoss:
                 texto_estrela, personagem_5estrela = await self._conceder_5_estrela(guild_id, membro)
                 if texto_estrela:
                     linhas.append(texto_estrela)
-            await asyncio.to_thread(db.creditar_wishards, guild_id, user_id, RECOMPENSA_WISHARDS_VITORIA, "worldboss_vitoria")
-            await asyncio.to_thread(db.creditar_xp_progressao, guild_id, user_id, RECOMPENSA_XP_VITORIA)
-            await asyncio.to_thread(db.creditar_soulstone, guild_id, user_id, RECOMPENSA_SOULSTONE_VITORIA, "worldboss_vitoria")
+            bonus_loot = await asyncio.to_thread(db.bonus_loot_colecao, guild_id, user_id)
+            config_boss = _config_worldboss(guild_id)
+            wishards = round(config_boss["worldboss_recompensa_wishards"] * (1 + bonus_loot))
+            xp = round(config_boss["worldboss_recompensa_xp"] * (1 + bonus_loot))
+            soulstone = round(config_boss["worldboss_recompensa_soulstone"] * (1 + bonus_loot))
+            await asyncio.to_thread(db.creditar_wishards, guild_id, user_id, wishards, "worldboss_vitoria")
+            await asyncio.to_thread(db.creditar_xp_progressao, guild_id, user_id, xp, "worldboss_vitoria")
+            await asyncio.to_thread(db.creditar_soulstone, guild_id, user_id, soulstone, "worldboss_vitoria")
             linhas.append(
-                f"💎 +{db.fmt_numero(RECOMPENSA_WISHARDS_VITORIA)} WiShards · 📈 +{db.fmt_numero(RECOMPENSA_XP_VITORIA)} XP · "
-                f"💠 +{db.fmt_numero(RECOMPENSA_SOULSTONE_VITORIA)} Soulstone",
+                f"💎 +{db.fmt_numero(wishards)} WiShards · 📈 +{db.fmt_numero(xp)} XP · "
+                f"💠 +{db.fmt_numero(soulstone)} Soulstone · 👑 +{db.fmt_numero(bonus_loot * 100)}% loot",
             )
-            item_raro = await asyncio.to_thread(itens.sortear_drop_raro)
+            # 🔥 Bônus de Nível de Progressão no drop raro (2026-09-06,
+            # pedido do usuário: "acho interessante se o Nivel de
+            # Progressao da conta tivesse mais influencia em tudo... ate
+            # drop").
+            nivel_progressao = await asyncio.to_thread(lambda: db.progressao_conta(guild_id, user_id)["nivel"])
+            bonus_drop = db.bonus_drop_raro_por_nivel(nivel_progressao)
+            item_raro = await asyncio.to_thread(itens.sortear_drop_raro, bonus_drop)
             if item_raro:
                 texto_item = await asyncio.to_thread(itens.conceder_item_drop, guild_id, user_id, item_raro)
                 linhas.append(f"🎁 DROP RARO! {texto_item}")

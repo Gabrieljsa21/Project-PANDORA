@@ -44,9 +44,16 @@ CHANCE_DROP_RARO = 0.15
 # esta muito caro. Diminui um pouco") - preço "primeiro palpite" de cima
 # estava alto demais na prática; continua "balanceável depois" como todo
 # valor novo desta sessão, fácil de reajustar aqui de novo se precisar.
+# 🔥 "upgrade_construcao" SAIU daqui (2026-09-07, pedido do usuário: "Vamos
+# tirar esse item da loja e permitir o jogador upar diretamente a
+# construção... o item ainda vai continuar existindo apenas como drop e
+# recompensa, p n ter q pagar o upgrade") - o item CONTINUA existindo em
+# `CATALOGO_ITENS`/`PESOS_DROP_RARO` (ainda cai como drop raro do World
+# Boss/prêmio da Diária, `usar_upgrade_construcao` continua consumindo-o
+# de graça), só não é mais COMPRÁVEL com WiShards na Loja - o caminho
+# pago virou `upar_construcao` (direto, sem item nenhum), ver mais abaixo.
 PRECOS_LOJA_ITENS = {
-    "protecao": 2_100, "revanche": 2_800, "chave_da_torre": 3_500,
-    "upgrade_construcao": 4_200, "chamado": 5_600,
+    "protecao": 2_100, "revanche": 2_800, "chave_da_torre": 3_500, "chamado": 5_600,
 }
 
 # 🔥 Itens de fato COMPRÁVEIS na Loja (2026-09-03) - subconjunto de
@@ -57,8 +64,40 @@ ITENS_LOJA = {chave: dados for chave, dados in CATALOGO_ITENS.items() if chave i
 # loja tem q aumentar o preço a medida q são comprados, igual os upgrades
 # de rolls") - crescimento "leve" (escolhido pelo usuário): +15% por
 # unidade já comprada, composto (dobra a cada ~5 compras) - fica pra
-# balanceamento como o resto, fácil de reajustar aqui.
+# balanceamento como o resto, fácil de reajustar aqui. Só vale pros itens
+# ainda comprados na Loja (Proteção/Revanche/Chave da Torre/Chamado,
+# comprados aos poucos, nunca centenas de vezes) - Upgrade de Construção
+# saiu desse modelo inteiro, ver `FAIXAS_CUSTO_CONSTRUCAO` abaixo.
 FATOR_CRESCIMENTO_PRECO_LOJA = 1.15
+
+# 🔥 Upar Construção DIRETO, sem item/Loja no meio (2026-09-07, pedido do
+# usuário: "Vamos aprimorar a logica das construcoes e torre com base no
+# level da progressao... andar_torre_esperado = nivel_progressao × 2;
+# nivel_construcao_esperado = nivel_progressao ÷ 2" + depois "Vamos tirar
+# esse item da loja e permitir o jogador upar diretamente a construção").
+# Conta real de teste: Progressão Lv224, Torre andar 398 (bate com o
+# esperado, ~2x); Construção média Lv14,8 (89 níveis / 6 áreas) - bem
+# ABAIXO do Lv112 esperado. Causa raiz original: o item "🏗️ Upgrade de
+# Construção" comprado na Loja tinha 1 preço COMPARTILHADO entre as 6
+# áreas (`db.total_comprado_item`, geométrico) - já era 606M na 86ª
+# unidade (85 já compradas), quando o design precisa de ~100 níveis por
+# área (6 áreas, cada uma com seu PRÓPRIO custo, "igual para todas as
+# construções" - palavras do usuário). Layout final: preço FIXO por
+# FAIXA de 10 níveis, igual pras 6 áreas, olhando pro nível ALVO daquela
+# área especificamente (não mais um contador vitalício compartilhado) -
+# tabela literal do usuário até o Nível 200 ("eu manteria esse padrão
+# para sempre"); além do Nível 200 (fora da tabela), continua subindo
+# +500.000 a cada faixa nova (mesmo incremento das 2 últimas faixas da
+# tabela, 181-190 -> 191-200), única continuação razoável sem inventar um
+# 2º padrão. Formato igual `db.FAIXAS_BONUS_CLASSE` (teto da faixa, valor
+# dela) - reaproveita a mesma convenção de "faixas" do resto do jogo.
+FAIXAS_CUSTO_CONSTRUCAO = (
+    (10, 100_000), (20, 250_000), (30, 400_000), (40, 600_000), (50, 800_000),
+    (60, 1_000_000), (70, 1_250_000), (80, 1_500_000), (90, 1_750_000), (100, 2_000_000),
+    (110, 2_250_000), (120, 2_500_000), (130, 2_750_000), (140, 3_000_000), (150, 3_250_000),
+    (160, 3_500_000), (170, 3_750_000), (180, 4_000_000), (190, 4_500_000), (200, 5_000_000),
+)
+INCREMENTO_CUSTO_CONSTRUCAO_ALEM_DA_TABELA = 500_000  # por faixa de 10 níveis, além do Nível 200
 
 LIMITE_ROLL_PERMANENTE = 5  # Seção 12 - "pode existir um limite máximo" (só drop agora, ver comentário acima)
 LIMITE_CLAIM_PERMANENTE = 5  # Seção 13 - idem
@@ -69,14 +108,16 @@ LIMITE_CLAIM_PERMANENTE = 5  # Seção 13 - idem
 # mas é a msm coisa, so use area") - virou o mesmo tuple de 6 áreas que
 # `cidade.FUNCOES_CIDADE` já usava, fonte única em `db.py`.
 AREAS_CONSTRUCAO = db.AREAS_CONSTRUCAO
-BONUS_POR_NIVEL_CONSTRUCAO = 0.10  # +10% de Poder na área, por nível (Seção 10: "melhora permanentemente o efeito")
 
 
-def sortear_drop_raro():
+def sortear_drop_raro(bonus_percentual=0.0):
     """Item sorteado, ou `None` (a maioria das vezes) - rolagem
     INDEPENDENTE por jogador (Seção 5: "o fato de um jogador receber um
-    drop não interfere na chance dos demais")."""
-    if random.random() >= CHANCE_DROP_RARO:
+    drop não interfere na chance dos demais"). `bonus_percentual`
+    (2026-09-06, `db.bonus_drop_raro_por_nivel`) - pequeno empurrão pelo
+    Nível de Progressão da conta, 0.0 = sem bônus (comportamento de
+    sempre)."""
+    if random.random() >= CHANCE_DROP_RARO + bonus_percentual:
         return None
     return _sortear_item_ponderado()
 
@@ -127,8 +168,10 @@ def conceder_item_drop(guild_id, user_id, item):
 def preco_unidade_loja(item, unidades_ja_compradas):
     """Preço da PRÓXIMA unidade desse item, dado quantas o jogador já
     comprou na Loja antes (vitalício, `db.total_comprado_item` - nunca cai
-    de volta quando o item é usado/consumido). Cresce geométrico
-    (`FATOR_CRESCIMENTO_PRECO_LOJA`) a partir do preço base."""
+    de volta quando o item é usado/consumido). Geométrico
+    (`FATOR_CRESCIMENTO_PRECO_LOJA`) a partir do preço base - "upgrade_
+    construcao" saiu da Loja (2026-09-07, ver `PRECOS_LOJA_ITENS`), não
+    passa mais por aqui."""
     base = PRECOS_LOJA_ITENS[item]
     return round(base * (FATOR_CRESCIMENTO_PRECO_LOJA ** unidades_ja_compradas))
 
@@ -212,6 +255,52 @@ def usar_upgrade_construcao(guild_id, user_id, area, quantidade=1):
     db.consumir_item(guild_id, user_id, "upgrade_construcao", quantidade)
     novo_nivel = db.subir_construcao(guild_id, user_id, area, quantidade)
     return True, f"🏗️ {area} subiu pro Nível {novo_nivel} (+{quantidade})!"
+
+
+def custo_construcao(nivel_alvo):
+    """Custo pra alcançar `nivel_alvo` NUMA construção (preço FIXO dentro
+    de cada faixa de 10 níveis, `FAIXAS_CUSTO_CONSTRUCAO` - "o nível
+    alcançado determina o preço", igual pras 6 áreas, 2026-09-07). Além do
+    Nível 200 (fora da tabela): continua subindo `INCREMENTO_CUSTO_
+    CONSTRUCAO_ALEM_DA_TABELA` por faixa nova, mesmo incremento das 2
+    últimas faixas da tabela."""
+    for teto_faixa, custo in FAIXAS_CUSTO_CONSTRUCAO:
+        if nivel_alvo <= teto_faixa:
+            return custo
+    faixas_alem = (nivel_alvo - 1) // 10 - (len(FAIXAS_CUSTO_CONSTRUCAO) - 1)
+    return FAIXAS_CUSTO_CONSTRUCAO[-1][1] + faixas_alem * INCREMENTO_CUSTO_CONSTRUCAO_ALEM_DA_TABELA
+
+
+def custo_total_construcao(nivel_atual, quantidade):
+    """Soma o custo de CADA nível de `nivel_atual+1` até `nivel_atual+
+    quantidade` - mesmo padrão de "custo total até" usado em Upar Nível/
+    Afinidade/Fortalecimento (`db.custo_total_ate_nivel` etc.), só que
+    olhando a tabela de faixas fixas em vez de uma fórmula contínua."""
+    return sum(custo_construcao(nivel_atual + i) for i in range(1, quantidade + 1))
+
+
+def upar_construcao(guild_id, user_id, area, quantidade=1):
+    """Sobe o Nível de Construção de `area` pagando WiShards DIRETO,
+    sem item/Loja no meio (2026-09-07, pedido do usuário: "Vamos tirar
+    esse item da loja e permitir o jogador upar diretamente a
+    construção... vamos pular essa parte de item do fluxo"). Mesmo teto
+    DINÂMICO de sempre (`db.teto_atual_construcao`, `quantidade` clampada
+    em silêncio pro que sobra até lá). `usar_upgrade_construcao` (item
+    dropado, ainda existe - World Boss/Diária) continua sendo o caminho
+    GRÁTIS em paralelo - os dois convivem, este aqui é só o caminho pago."""
+    if area not in AREAS_CONSTRUCAO:
+        return False, "Área inválida."
+    nivel_atual = db.nivel_construcao(guild_id, user_id, area)
+    teto = db.teto_atual_construcao(guild_id, user_id)
+    if nivel_atual >= teto:
+        return False, f"{area} já está no teto atual (Nível {teto}) - suba as outras áreas até lá pro teto aumentar."
+    quantidade = min(quantidade, teto - nivel_atual)
+    custo_total = custo_total_construcao(nivel_atual, quantidade)
+    if db.saldo_wishards(guild_id, user_id) < custo_total:
+        return False, f"Custa {db.fmt_numero(custo_total)} WiShards e você não tem o suficiente."
+    db.creditar_wishards(guild_id, user_id, -custo_total, "upar_construcao", area)
+    novo_nivel = db.subir_construcao(guild_id, user_id, area, quantidade)
+    return True, f"🏗️ {area} subiu pro Nível {novo_nivel} (+{quantidade}, {db.fmt_numero(custo_total)} WiShards)!"
 
 
 def usar_chamado(guild_id, user_id, boss_tipo):

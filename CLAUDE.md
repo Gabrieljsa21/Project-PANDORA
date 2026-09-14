@@ -17,7 +17,7 @@ detalhe técnico).
   `CHANGELOG.md`, `pyproject.toml`, `.gitignore`, o pacote `pandora/` e a
   pasta `data/` (runtime, banco real + backups, nunca lixo de código).
 - **`docs/`** - toda documentação que não seja `README.md`/`CHANGELOG.md`:
-  `ARQUITETURA.md`, `TODO.md`, `FUNCIONALIDADES.md`, e `docs/specs/` (os 3
+  `docs/ARQUITETURA.md`, `docs/TODO.md`, `docs/FUNCIONALIDADES.md`, e `docs/specs/` (os 3
   specs congelados, ver abaixo). Mesma convenção do `assistant/docs/` da
   GAIA.
 - **`scripts/`** - scripts Python de uso único (backfill/reclassificação/

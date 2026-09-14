@@ -7,7 +7,7 @@ raciocínio de implementação, ver `ARQUITETURA.md`). Atualizar sempre que um
 botão/comando for adicionado, removido ou mudar de comportamento visível
 pro jogador (ver `CLAUDE.md`).
 
-PANDORA é uma biblioteca importada pelo [Project-ERIS](../Project-ERIS), que
+PANDORA é uma biblioteca importada pelo [Project-ERIS](../../Project-ERIS), que
 registra os comandos de barra de verdade - por isso alguns comandos citados
 aqui (`/wa`, `/pandora_admin`, etc.) vivem no código do ERIS, não neste repo.
 
@@ -61,7 +61,8 @@ quem digitou `/pandora` pode clicar nos próprios botões.
 **Linha 3**
 - **🏙️ Cidade**: mostra o status da produção da Cidade (a alocação de
   personagens às funções é automática, por classe - aqui só se coleta o que
-  já foi produzido).
+  já foi produzido) + botões pra comprar/usar Upgrade de Construção direto
+  do painel.
 - **🗼 Torre**: abre o andar atual da Torre de desafios.
 - **🐉 World Boss**: abre o painel do chefão cooperativo do servidor (visível
   a qualquer jogador, não só a quem abriu o hub).
@@ -163,15 +164,15 @@ Aberta pelo botão **🛒 Loja** do hub.
 - **🔺 Upgrade de claims**: mesma lógica, mas pra claims (+1 claim por ciclo
   por nível). Preços dos 5 primeiros níveis: 2.000 / 5.000 / 10.000 /
   20.000 / 40.000 WiShards; também dobra a partir do nível 6.
-- **🏋️ Treinamento Global**: sobe permanentemente um Nível de Treinamento
+- **🏋️ Treinamento da Coleção**: sobe permanentemente um Nível de Treinamento
   que dá +25 de CP fixo pra TODAS as personagens da coleção, pra sempre.
   Sem teto de nível; custo por nível = nível² WiShards.
-- **📊 Potencial da Coleção**: como o Treinamento Global, mas o bônus é
+- **📊 Maestria da Coleção**: como o Treinamento da Coleção, mas o bônus é
   percentual (+2% de CP global por nível) em vez de fixo. Custo por nível =
   2 × nível² WiShards.
 
   **Como comprar vários níveis de uma vez** (Upgrade de rolls/claims,
-  Treinamento Global, Potencial da Coleção): mesmo dropdown com custo
+  Treinamento da Coleção, Maestria da Coleção): mesmo dropdown com custo
   acumulado + confirmação do "⬆️ Upar Nível" da seção "🔍 Personagem" acima,
   mostrando também quanto você tem no momento no placeholder ("Você tem X
   WiShards - escolha o Nível alvo..."). Diferença aqui: como esses 4 não têm
@@ -181,21 +182,24 @@ Aberta pelo botão **🛒 Loja** do hub.
 - **Itens** (botões diretos, sem passar por menu): clicar abre o mesmo
   dropdown de "até quanto" das outras seções (custo TOTAL acumulado por
   opção + confirmação), deixando comprar de 1 até 25 unidades de uma vez
-  só; preço sobe 15% por unidade já comprada, então cada opção do dropdown
-  mostra quanto custaria comprar aquela quantidade no preço já escalado.
+  só; preço sobe 15% por unidade já comprada (geométrico), então cada
+  opção do dropdown mostra quanto custaria comprar aquela quantidade no
+  preço já escalado.
   - 🛡️ **Proteção** (2.100 WiShards base): protege 1 personagem de ser
     perdida numa Batalha 5x5 enquanto ativa.
   - ⚔️ **Revanche** (2.800 WiShards base): desafia de novo por uma
     personagem perdida no PvP, ignorando cooldown/limite diário.
   - 🗝️ **Chave da Torre** (3.500 WiShards base): ignora a restrição de
     categoria na próxima tentativa de andar da Torre.
-  - 🏗️ **Upgrade de Construção** (4.200 WiShards base): sobe permanentemente
-    o nível de uma construção da Cidade.
   - 📯 **Chamado** (5.600 WiShards base): escolhe qual World Boss aparece no
     próximo horário fixo desse servidor.
 
   (Roll Permanente e Claim Permanente, dois outros itens do catálogo, só
-  vêm de drop raro do World Boss/Diária, não são comprados na Loja.)
+  vêm de drop raro do World Boss/Diária, não são comprados na Loja. "🏗️
+  Upgrade de Construção" TAMBÉM saiu daqui, 2026-09-07 - "Vamos tirar esse
+  item da loja e permitir o jogador upar diretamente a construção" - ver
+  "💰 Upar Construção" na seção "🏙️ Cidade" abaixo; o item continua
+  existindo, só não é mais comprável com WiShards.)
 
 ---
 
@@ -293,15 +297,18 @@ só na primeira vez que é reivindicada em qualquer servidor. Cada classe
 pertence a uma de três **categorias de combate**: ⚔️ DPS, 🛡️ Tank ou
 ✨ Support (decidida automaticamente pelo jogo).
 
-A cada **5 personagens da mesma classe** que o jogador possui, todas as
-personagens daquela classe ganham **+50 de CP** de bônus, cumulativo (10 =
-+100, 15 = +150...). O bônus é por classe individual.
+A cada **N personagens da mesma classe** que o jogador possui, todas as
+personagens daquela classe ganham **+50 de CP** de bônus, cumulativo (2N =
++100, 3N = +150...). O bônus é por classe individual. N é **5** pra
+DPS/Support, mas **2** pra Tank (2026-09-06, achado do usuário: Tank é
+estruturalmente ~11x mais raro no catálogo que Support - marco menor
+compensa isso sem precisar reclassificar nenhuma personagem).
 
 Tela **"⚔️ Classes"**: mostra, por categoria (DPS/Tank/Support/Sem
 categoria), o total de bônus de CP somado e quantas personagens compõem
 esse total, mais uma lista de cada classe possuída com o bônus atual e o
-progresso até o próximo marco de 5 (ex.: "3/5 pro próximo marco"). Botão
-"🔄 Atualizar" recalcula na hora.
+progresso até o próximo marco (ex.: "3/5 pro próximo marco", ou "1/2" pra
+uma classe Tank). Botão "🔄 Atualizar" recalcula na hora.
 
 ### Ranking
 
@@ -440,21 +447,21 @@ um card de detalhe à parte - é uma tela só, navegável.
 
 **Slots**: 5 gratuitos, até 20 extras - botão "Comprar slot" dentro da
 PRÓPRIA tela de Waifus (2026-09-06: não existe mais uma opção redundante na
-Loja pra isso, só esse caminho), total 25. Preço escalonado, de 5.000
-WiShards no 1º slot pago até 16 bilhões no 20º:
+Loja pra isso, só esse caminho), total 25. Os slots 6–25 custam de 5M a
+100M WiShards em progressão linear:
 
 | Slot nº | Custo (WiShards) | Slot nº | Custo (WiShards) |
 |---|---|---|---|
-| 1 | 5.000 | 11 | 30.000.000 |
-| 2 | 15.000 | 12 | 60.000.000 |
-| 3 | 40.000 | 13 | 125.000.000 |
-| 4 | 100.000 | 14 | 250.000.000 |
-| 5 | 250.000 | 15 | 500.000.000 |
-| 6 | 600.000 | 16 | 1.000.000.000 |
-| 7 | 1.400.000 | 17 | 2.000.000.000 |
-| 8 | 3.000.000 | 18 | 4.000.000.000 |
-| 9 | 6.500.000 | 19 | 8.000.000.000 |
-| 10 | 14.000.000 | 20 | 16.000.000.000 |
+| 6 | 5.000.000 | 16 | 55.000.000 |
+| 7 | 10.000.000 | 17 | 60.000.000 |
+| 8 | 15.000.000 | 18 | 65.000.000 |
+| 9 | 20.000.000 | 19 | 70.000.000 |
+| 10 | 25.000.000 | 20 | 75.000.000 |
+| 11 | 30.000.000 | 21 | 80.000.000 |
+| 12 | 35.000.000 | 22 | 85.000.000 |
+| 13 | 40.000.000 | 23 | 90.000.000 |
+| 14 | 45.000.000 | 24 | 95.000.000 |
+| 15 | 50.000.000 | 25 | 100.000.000 |
 
 **Regra central: a progressão é do SLOT, não da personagem.** Colocar uma
 personagem no slot não dá Power de graça - o slot guarda um progresso
@@ -548,8 +555,8 @@ percorrendo só as personagens daquela série):
 > pedido do usuário: "os de personagem tem q ser igual do party" +
 > "no dropdown tbm tem q mostrar a classe") - toda lista de personagem que
 > aparece num select (Party, Fusão, Trocas, "🔍 Personagem"/"Trocar
-> personagem", Batalha, Proteção, Revanche, Prova de Soulmate, Loja
-> "Comprar") mostra a MESMA informação: ícone de categoria (⚔️/🛡️/✨),
+> personagem", Batalha, Proteção, Revanche, Loja "Comprar") mostra a MESMA
+> informação: ícone de categoria (⚔️/🛡️/✨),
 > classe, raridade, e **CP base** (Power Base natural, 300-1000, só a
 > popularidade da personagem importa - o número que decide quanto do
 > Fortalecimento de um slot de Waifu ela já cobre sozinha, ver seção
@@ -594,20 +601,19 @@ valor de loja do que está sendo pedido a ela.
 Botão **🧬 Fusão** do hub - transforma 5 personagens da mesma raridade em 1
 personagem à escolha, dentro da mesma faixa de raridade:
 
-1. Abre um dropdown de multi-seleção nativo do Discord com as **25
-   personagens de MAIOR CP** da sua coleção inteira (raridades misturadas,
-   ordenado por CP, não por nome/raridade) - você marca (tick) exatamente 5
-   nessa lista, todas precisam ser da MESMA raridade entre si. **Importante:**
-   diferente de outras telas do jogo, aqui não tem campo de busca por nome
-   pra filtrar - se as personagens que você quer sacrificar (ex.: 1⭐/2⭐ de
-   baixo CP) não estiverem entre as 25 de maior CP da sua coleção, elas
-   simplesmente não aparecem pra escolher.
-2. Se alguma das 5 tiver vínculo (Afinidade > 1), pede confirmação extra
+1. Escolhe a raridade das personagens que serão sacrificadas. Só aparecem
+   raridades nas quais você possui pelo menos 5 personagens.
+2. Escreve os nomes das 5 personagens em campos separados. A busca usa a
+   coleção inteira daquela raridade, aceita nome completo, parcial ou um erro
+   pequeno de digitação e nunca repete a mesma personagem. O corte de
+   similaridade é conservador porque uma escolha errada teria consequência
+   permanente.
+3. Se alguma das 5 tiver vínculo (Afinidade > 1), pede confirmação extra
    antes de continuar.
-3. Depois de confirmar o sacrifício, escolhe (outro dropdown, até 25
-   opções) entre as personagens **livres** daquela raridade no servidor
-   qual quer receber - é escolha sua, não sorteio.
-4. Ao confirmar, as 5 saem da coleção e a escolhida entra, mais XP de
+4. A tela mostra os 5 nomes interpretados. Depois, escolhe em outro dropdown
+   com até 25 opções entre as personagens **livres** daquela raridade no
+   servidor. A escolha de quem receber é sua.
+5. Ao confirmar, as 5 saem da coleção e a escolhida entra, mais XP de
    Progressão proporcional à raridade sacrificada.
 
 Se a escolhida for reivindicada por outra pessoa no meio do processo, a
@@ -637,24 +643,40 @@ Em camadas, nessa ordem:
    Soulmate, a Afinidade (1-10) dá de 1,0x a 1,9x (10% por ponto).
 4. **Bônus de Progressão Global da conta**: fixo + percentual, por cima do
    resultado acima (cresce com o progresso da CONTA, não da personagem).
-5. **Bônus por Classe**: a cada 5 personagens da mesma classe possuídas,
-   TODAS dessa classe ganham +50 de Power fixo (10 = +100, 15 = +150...).
+   O Nível de Progressão também influencia, com efeito mais discreto e
+   sempre com teto, **3 outros sistemas** fora do CP (2026-09-06): um
+   desconto pequeno no custo de Treinamento Global/Potencial da Coleção
+   (até 25% no teto), um empurrão pequeno na chance de drop raro do World
+   Boss (até +5 pontos percentuais no teto) e um empurrão pequeno nas
+   odds de 4⭐/5⭐ de qualquer roll (até 3x a chance base no teto).
+5. **Bônus por Classe**: a cada N personagens da mesma classe possuídas,
+   TODAS dessa classe ganham +50 de Power fixo (marco N=5 pra DPS/Support;
+   N=2 pra Tank - 2026-09-06, compensa a raridade estrutural de Tank no
+   catálogo, ~11x menos personagens que Support).
 6. **Bônus de Série Favorita**: percentual só nas personagens daquela
    série (ver seção "Séries Favoritas").
 7. **Personagem Favorita** (se ocupa um slot de Waifu): o Power Base
    natural (item 1) é substituído pelo Power Base do slot (Fortalecimento/
    Ascensão) - o resto da fórmula continua igual em cima desse novo valor.
 
+Na tela **🔍 Personagem**, o botão **📊 Detalhes CP** abre uma conta item a
+item: Base natural/efetiva, Fortalecimento, Ascensão, Nível, Afinidade ou
+Soulmate, Progressão, Maestria da Coleção, Série Favorita, Treinamento da
+Coleção e Classe. Arcano, Militar e composição ficam de fora porque são
+bônus da Party, não da personagem individual.
+
 ### Power da Party
 
-Soma o Power dos até 5 membros, **+10% se tiver as 3 categorias juntas**
-(DPS + Tank + Support), mais o bônus vindo da Cidade (CP fixo do Bônus da
-Coleção + CP fixo do Militar, multiplicado por `(1 + % do Arcano)`).
+Soma o CP dos até 5 membros, **+10% se tiver as 3 categorias juntas**
+(DPS + Tank + Support), aplica o percentual do Arcano e adiciona o CP fixo
+do Militar: `(soma × composição) × (1 + Arcano) + Militar`. Administração
+já está incluída no valor efetivo de Arcano e Militar.
 
 ### Andares
 
-- **Power necessário**: cresce ~6% por andar, partindo de ~1.000 no Andar
-  1 (chega a ~16.000 no Andar 50), sem fim fixo.
+- **Power necessário**: segue uma curva de potência, partindo de 1.000 no
+  Andar 1 e chegando a 150K no Andar 400, sem fim fixo. A referência de
+  balanceamento é Progressão Lv200 → Construções Lv100 → Torre andar 400.
 - **Restrição de categoria**, em ciclo de 6 andares: Andar 1/7/13... sem
   restrição; 2/8/14... precisa de 1+ Tank; 3/9/15... precisa de 1+ Support;
   4/10/16... no máximo 1 Tank; 5/11/17... precisa das 3 categorias juntas;
@@ -675,6 +697,8 @@ WiShards = `50 × andar`. XP de Progressão = `10 × andar`, ×5 em andares
 - **Auto-Party**: monta a melhor Party pro andar atual usando toda a
   coleção.
 - **Atualizar**: recarrega o preview.
+- **Detalhes da Party**: abre a soma dos CPs individuais, a composição, o
+  Arcano, o Militar e a fórmula exata do Power exibido.
 - **Estatísticas**: top 10 de personagens que mais venceram andares.
 
 ### Chave da Torre (item)
@@ -695,8 +719,33 @@ manual. Cada classe está permanentemente ligada a uma de 6 funções:
 ⚔️ Militar, ⚕️ Saúde, 🎭 Cultura, 📜 Administração, 🏪 Comércio, 🔮 Arcano.
 Personagem sem classe revelada ainda não conta pra nenhuma.
 
-**Poder da Área** = CP total dos trabalhadores + (quantidade × 50) - nunca
-só quantidade ou só CP sozinhos.
+**Marcos por Construção** (2026-09-07, substituiu de vez o "Poder da
+Área"/CP-ponderado e o marco com retorno decrescente que as 3 áreas de
+CP tinham desde o dia anterior) - fórmula ÚNICA pras 6 áreas, especificada
+pelo usuário com exemplo numérico próprio validado 1 a 1 pra cada área:
+
+```
+marcos      = floor(personagens_na_área / 5)
+bônus_marco = bônus_base_da_área × nível_da_construção
+bônus_total = marcos × bônus_marco
+```
+
+Cada 5 personagens trabalhando na área vira 1 marco - **sem bônus
+parcial** entre marcos e **sem retorno decrescente** (a única diminuição
+de retorno do jogo continua sendo o Bônus por Classe, não a Cidade). O
+Nível da Construção MULTIPLICA DIRETO o valor de cada marco (Lv10 = 10x
+o valor do Lv1), exceto em **Militar e Arcano**, que usam `Lv × 0,05`
+(Lv10 = 0,5x) - **o bônus já começa no Lv1** mesmo numa área sem NENHUM
+Upgrade de Construção comprado ainda (2026-09-07, "tem q começar ja no
+lv1" - o Lv0 zerando tudo, do palpite inicial, foi corrigido no mesmo
+dia). Bônus-base por marco, no Lv1, de cada área:
+⚔️ Militar +10 CP fixo · ⚕️ Saúde +0,5 Soulstone/h · 🎭 Cultura +25 XP/h ·
+📜 Administração +0,005% de eficiência das outras áreas · 🏪 Comércio
++50 WiShards/h (reduzido de 250, 2026-09-07 - "a partir da decisão de
+reduzir o Comércio para base 50", rendia rápido demais perto do novo
+custo de Upar Construção) · 🔮 Arcano +0,01% de CP. Nunca depende de CP, só de
+QUANTIDADE de trabalhadores - imune a qualquer inflação futura de fórmula
+individual.
 
 **Recursos que acumulam com o tempo** (creditados só quando o painel é
 aberto, teto de acúmulo de 7 dias):
@@ -712,26 +761,86 @@ Power da Party na Torre):
   outras 5 áreas (mais Soulstone/XP/WiShards por hora, mais CP de
   Militar/Arcano). Não afeta o Bônus da Coleção.
 
-**👑 Bônus da Coleção**: sempre soma 1% de todo o CP da coleção inteira
-(mesmo quem está na Party) como CP fixo extra pra Party, automático.
+**👑 Bônus da Coleção**: multiplicador global de loot, baseado no **CP
+total da coleção inteira** (inclusive quem está na Party), sem teto.
+`Bônus de Loot = CP da Coleção ÷ 1M`: 308M CP gera +308%, logo as
+recompensas são multiplicadas por 4,08. Afeta WiShards e XP da Torre e
+dos claims, além de WiShards, XP e Soulstone do World Boss. Não afeta
+produção da Cidade, raridade de drops nem o Power da Party.
 
-**🏗️ Upgrade de Construção** (item, usado pelo Inventário): sobe
-permanentemente o Nível de Construção de UMA área à escolha (+10% de Poder
-por nível, permanente, empilha). Teto dinâmico: começa em 10 pra todas, só
-sobe pra 20/30/... quando TODAS as 6 áreas já bateram o teto anterior (a
-mais atrasada trava as outras, incentivando desenvolvimento equilibrado).
-Fluxo de uso em 2 passos: (1) um dropdown pra escolher A ÁREA, já mostrando
-o nível atual de cada uma contra o teto (ex.: "⚔️ Militar (Nível 7/10)");
-(2) depois de escolher, outro dropdown - mesmo padrão do "⬆️ Upar Nível" -
-listando até onde subir de uma vez (quantos Upgrades de Construção você tem
-guardados x quantos níveis faltam pro teto), com confirmação antes de
-gastar.
+**Nível de Construção**: sobe o bônus de UMA área à escolha (multiplica o
+bônus de cada marco daquela área, ver fórmula acima). Teto dinâmico:
+começa em 50 pra todas (2026-09-07, era 10 - "P subir p 51, todas tem de
+ta 50. P subir p 101, todas tem de ta em 100"), só sobe pra 100/150/...
+quando TODAS as 6 áreas já bateram o teto anterior (a mais atrasada trava
+as outras, incentivando desenvolvimento equilibrado). 2 caminhos pra
+subir, os dois direto no painel da Cidade:
+- **💰 Upar Construção** (2026-09-07, "Vamos tirar esse item da loja e
+  permitir o jogador upar diretamente a construção... vamos pular essa
+  parte de item do fluxo"): paga WiShards DIRETO, sem item nenhum - preço
+  FIXO por faixa de 10 níveis, IGUAL pras 6 áreas, olhando o nível ALVO
+  daquela área especificamente (Lv1-10 = 100K, Lv11-20 = 250K, ...,
+  Lv191-200 = 5M; além do Nível 200, +500.000 por faixa nova, mesmo
+  incremento das 2 últimas faixas da tabela - "eu manteria esse padrão
+  para sempre").
+- **🏗️ Usar Upgrade de Construção (x`N`)** (item, de graça): sobe usando o
+  item "🏗️ Upgrade de Construção" - só vem de drop raro do World Boss/
+  prêmio da Diária agora (2026-09-07, saiu da Loja - não é mais comprável
+  com WiShards). **Só aparece se o jogador tiver pelo menos 1 guardado**
+  (2026-09-07, "Podia informar quantos upgrades de construção tenho. E
+  se nao tiver nenhum ja avisar de inicio, ou sequer aparecer o botão de
+  usar eles" - mesmo padrão do 🎒 Inventário) - o rótulo já mostra quantos
+  tem (`(x3)`), sem precisar clicar em nada.
 
-O painel mostra, por área: quantas personagens trabalhando e CP total,
-Nível de Construção atual, bônus atual "ao vivo". Qualquer mudança na
-Party/CP (montar Party, Auto-Party, upar Nível/Afinidade, Divorciar,
-Fusão...) atualiza o bônus de CP da Cidade na hora, sem precisar reabrir o
-painel.
+Os 2 fluxos de uso são iguais em 2 passos: (1) um dropdown pra escolher A
+ÁREA, já mostrando o nível atual de cada uma contra o teto (ex.: "⚔️
+Militar (Nível 7/10)"); (2) depois de escolher, outro dropdown - mesmo
+padrão do "⬆️ Upar Nível" - listando até onde subir de uma vez (custo
+total acumulado ou quantos Upgrades de Construção você tem guardados,
+conforme o caminho), com confirmação antes de gastar.
+
+O painel mostra, por área: quantas personagens trabalhando e CP total
+(informativo - a fórmula acima não usa CP), Nível de Construção atual (com
+pips ◆/◇ além do número, 2026-09-06), bônus atual "ao vivo". 1ª fileira:
+"💰 Upar Construção", "🏗️ Usar Upgrade de Construção (x`N`)" (se tiver
+algum), "📈 Progressão" e "🔄 Atualizar" (nessa ordem, 2026-09-07 -
+"Coloca o progressao antes do botao atualizar, na primeira fileira").
+Qualquer mudança na Party/CP (montar Party, Auto-Party, upar Nível/
+Afinidade, Divorciar, Fusão...) atualiza o bônus de CP da Cidade na hora,
+sem precisar reabrir o painel.
+
+**Botão de detalhe por área** (2026-09-06/07, mockup + especificação do
+usuário em `PANDORA_marcos_cidade.md`): 6 botões novos no painel
+principal (1 por área), cada um abre uma tela EPHEMERAL (só quem clicou
+vê, o painel principal continua aberto por trás) - mesma tela pras 6
+áreas, já que todas usam a mesma fórmula:
+- **Trabalhando aqui**: quantos personagens trabalham na área. O CP da
+  coleção aparece apenas no Bônus da Coleção, pois não participa do cálculo
+  individual das estruturas.
+- **Bônus atual**: o valor REAL vigente pra Party/produção.
+- **Marcos**: quantos marcos concluídos + o valor de CADA marco individual
+  (não o total) no Nível de Construção atual.
+- **Próximo marco**: progresso atual/próximo (sempre +5 personagens) +
+  quantos faltam.
+- **📊 Detalhes do cálculo** (2026-09-07, "quero q as areas tenham as infos
+  do calculo mais detalhadas"): 3 blocos - **Fórmula** (`B_final = M ×
+  B_base × Lv × (1 + A)`; Militar e Arcano usam `B_final = M × B_base ×
+  (Lv × 0,05) × (1 + A)` - Administração sai sem o termo `(1 + A)`, nunca
+  cruza sobre si mesma), **Variáveis** (M/B_base/Lv/A/B_final nomeados,
+  cada um com o valor atual), **Cálculo** (a conta numérica por extenso,
+  ex.: "595 × 10 × 10 × (1 + 0,179) = 70,2K CP") - sem listar marcos
+  individualmente, por pedido explícito do documento de especificação.
+
+**📈 Progressão** (2026-09-07, "depois na tela de cidade vc traz um botao
+de progressao, mostrando as fontes de xp acumaladas ate entao"): botão na
+1ª fileira, antes do "🔄 Atualizar" (2026-09-07, "Coloca o progressao
+antes do botao atualizar, na primeira fileira"), abre tela EPHEMERAL com
+Nível/XP atual + quanto falta pro próximo nível, e a soma de XP creditado
+por
+ORIGEM (Cidade/produção, Torre/andar, Claims, Divórcio, Upar Nível,
+Fusão, Marcos de coleção) desde que o ledger de XP passou a existir
+(2026-09-07) - XP creditado antes disso não tem fonte discriminada, só
+conta no Nível/XP totais.
 
 ---
 

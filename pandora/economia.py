@@ -121,7 +121,7 @@ class ViewTroca(discord.ui.View):
     aceite)."""
 
     def __init__(self, proposta_id, alvo_id):
-        super().__init__(timeout=600)
+        super().__init__(timeout=300)
         self.proposta_id = proposta_id
         self.alvo_id = str(alvo_id)
 
@@ -244,7 +244,7 @@ def executar_merge(guild_id, user_id, ids, escolha_id):
     # "desenvolver personagens" inclui o Merge) - baseado na raridade das
     # 5 sacrificadas (a nova é da MESMA raridade agora, não faria diferença
     # de qualquer forma).
-    db.creditar_xp_progressao(guild_id, user_id, 25 * raridade)
+    db.creditar_xp_progressao(guild_id, user_id, 25 * raridade, "merge")
     # 🔥 Contador vitalício (2026-09-01, Conquistas do Colecionador,
     # "col_merges") - sem rastro histórico em nenhuma outra tabela (só
     # claims/trocas são deriváveis do ledger/`colecao_troca_proposta`).

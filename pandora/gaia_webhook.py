@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """Webhook reverso PANDORA -> GAIA - EXTRAÍDO do Project-ERIS em 2026-08-29
-(era `eris/integrations/gaia_webhook.py`, só as 2 funções do Colecionador -
+(era `eris/integrations/gaia_webhook.py`, só a função do Colecionador -
 `pedir_resposta_persona`/voz/música/lista de desejo ficaram no ERIS, que
 continua sendo quem tem a conexão Discord de verdade). Mesma URL/porta de
 sempre (`pandora.config.URL_BASE_GAIA`, aponta pro MESMO servidor HTTP da
-GAIA que o ERIS já usava) - as rotas do lado da GAIA (`integrations/
-iris_bridge.py::/eris/colecao_classificar`/`/eris/colecao_prova_soulmate`)
-não mudaram nada, só quem CHAMA de dentro do Python mudou de módulo."""
+GAIA que o ERIS já usava) - a rota do lado da GAIA (`integrations/
+iris_bridge.py::/eris/colecao_classificar`) não mudou nada, só quem CHAMA de
+dentro do Python mudou de módulo.
+
+🔥 A rota irmã `/eris/colecao_prova_soulmate` (e `pedir_prova_soulmate` aqui)
+foi removida em 2026-09-14 junto com a Prova de Soulmate inteira (dead code,
+substituída por Afinidade máxima virando Soulmate automaticamente) - ver
+CHANGELOG.md."""
 import json
 import urllib.request
 
@@ -62,31 +67,3 @@ def pedir_classe_personagem(nome, descricao, serie, genero, classes_existentes):
         "categoria_combate": (resultado.get("categoria_combate") or "").strip() or None,
         "funcao_cidade": (resultado.get("funcao_cidade") or "").strip() or None,
     }
-
-
-_CAMPOS_TEXTO_PROVA_SOULMATE = (
-    "prova_soulmate_nome", "prova_soulmate_descricao", "prova_soulmate_situacao",
-    "prova_soulmate_reacao_acerto", "prova_soulmate_reacao_erro",
-    "prova_soulmate_derrota", "prova_soulmate_vitoria",
-)
-
-
-def pedir_prova_soulmate(nome, descricao, serie, genero):
-    """Pede pra GAIA (LLM) gerar o conteúdo da Prova de Soulmate de uma
-    personagem, na 1ª vez que ela chega em Afinidade 10 (ver
-    `pandora.gacha.obter_textos_prova_soulmate`) - mesmo padrão de
-    `pedir_classe_personagem` acima, cacheado pra sempre depois de gerado
-    (`db.definir_textos_prova_soulmate`). Devolve um dict com os campos de
-    `_CAMPOS_TEXTO_PROVA_SOULMATE` + `prova_soulmate_opcoes` (list de 3
-    dicts `{"texto", "correta"}`, já validado do lado da GAIA - ver
-    `core.agent.turno._normalizar_opcoes_prova_soulmate`) - todos None se a
-    GAIA estiver fora do ar/recusou; quem chama cai pra um texto genérico
-    nesse caso, a mecânica (chance/pity/bônus) nunca depende disso."""
-    resultado = _post("/eris/colecao_prova_soulmate", {
-        "nome": nome, "descricao": descricao or "", "serie": serie or "", "genero": genero,
-    })
-    if not resultado:
-        return {**{campo: None for campo in _CAMPOS_TEXTO_PROVA_SOULMATE}, "prova_soulmate_opcoes": None}
-    dados = {campo: (resultado.get(campo) or "").strip() or None for campo in _CAMPOS_TEXTO_PROVA_SOULMATE}
-    dados["prova_soulmate_opcoes"] = resultado.get("prova_soulmate_opcoes") or None
-    return dados
