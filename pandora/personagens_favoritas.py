@@ -15,14 +15,13 @@ Afinidade/Soulmate.
 
 🔥 A regra central: a progressão pertence ao SLOT, nunca à personagem que o
 ocupa. Trocar de ocupante NUNCA reseta `fortalecimento_bitmask`/
-`nivel_ascensao` (ver `db.definir_personagem_favorita`) - a personagem nova
-só herda o que já foi comprado ali depois de preencher, ela mesma, toda
-lacuna entre seu próprio Power Base natural e o que já foi desbloqueado
-(`_estado_fortalecimento` abaixo resolve isso sozinho, mesmo algoritmo pros
-2 casos: natural alto pulando patamares baixos nunca comprados, e natural
-baixo parando na primeira lacuna mesmo com patamares mais altos já
-comprados). Adicionar uma personagem como Favorita, por si só, NÃO concede
-nenhum Power - só dá acesso ao que aquele slot já tinha."""
+`nivel_ascensao` (ver `db.definir_personagem_favorita`) - a progressão do
+slot sempre começa no patamar 300→350 e segue em ordem, independente da
+Base natural da ocupante. Uma personagem que já tenha Base 951 ainda paga
+os patamares anteriores, mesmo que eles não aumentem o CP dela; só o trecho
+do slot acima da Base natural produz efeito. Adicionar uma personagem como
+Favorita, por si só, NÃO concede nenhum Power - só dá acesso ao que aquele
+slot já tinha."""
 from pandora import db, torre
 
 SLOTS_MAXIMO = db.SLOTS_BASE_PERSONAGEM_FAVORITA + db.NIVEL_MAXIMO_UPGRADE_SLOT_PERSONAGEM_FAVORITA
@@ -59,25 +58,32 @@ def custo_ascensao(nivel):
     return CUSTO_ASCENSAO_BASE + (nivel - 1) * CUSTO_ASCENSAO_INCREMENTO
 
 
+def custo_ascender_ate(nivel_atual, nivel_alvo):
+    """Soulstone total para comprar todas as Ascensões de ``nivel_atual``
+    até ``nivel_alvo``. Mantém a compra estritamente sequencial, mas deixa a
+    interface mostrar e confirmar um único custo acumulado, igual ao
+    Fortalecimento."""
+    if nivel_alvo <= nivel_atual:
+        return 0
+    return sum(custo_ascensao(nivel) for nivel in range(nivel_atual + 1, nivel_alvo + 1))
+
+
 def _estado_fortalecimento(popularidade, bitmask):
     """Núcleo do sistema - devolve `(power_atual, indice_proximo_patamar)`,
-    o 2º `None` se os 14 patamares já foram todos cobertos (natural OU
-    comprado). Sobe a partir do Power Base NATURAL (`torre.power_base`,
-    fórmula original intocada), patamar por patamar em ORDEM:
-    - se o Power natural já ultrapassa esse patamar, pula ele sem checar o
-      bit (nunca precisa comprar o que já superou naturalmente - Seção 4);
-    - senão, só sobe se o bit estiver ligado NESSE slot; no primeiro bit
-      desligado, PARA ali (lacuna) - mesmo com patamares mais altos já
-      comprados no slot (Seção 5, "troca de personagem")."""
-    atual = torre.power_base(popularidade)
+    o 2º `None` se os 14 patamares do SLOT já foram comprados. O slot
+    sempre começa em 300 e exige cada patamar em ordem, sem pular nenhum
+    por causa da Base natural da personagem. O poder efetivo é o maior
+    entre Base natural e o patamar contínuo já comprado: assim, uma Base
+    951 continua 951 até o slot alcançar 1000, mas ainda precisa comprar
+    300→350, 350→400, ... normalmente."""
+    base_natural = torre.power_base(popularidade)
+    atual_slot = 300
     for indice, (_lo, hi) in enumerate(PATAMARES_FORTALECIMENTO):
-        if atual >= hi:
-            continue
         if bitmask & (1 << indice):
-            atual = hi
+            atual_slot = hi
         else:
-            return atual, indice
-    return atual, None
+            return max(base_natural, atual_slot), indice
+    return max(base_natural, atual_slot), None
 
 
 def power_efetivo(popularidade, bitmask, nivel_ascensao, elegivel):
@@ -103,7 +109,9 @@ def elegivel_ascensao(personagem, nivel_personagem, power_atual):
 
 
 def slots_disponiveis(guild_id, user_id):
-    return db.SLOTS_BASE_PERSONAGEM_FAVORITA + db.nivel_upgrade_slots_personagem_favorita(guild_id, user_id)
+    # Compras antigas são preservadas; novos slots vêm exclusivamente da Torre.
+    legado = db.SLOTS_BASE_PERSONAGEM_FAVORITA + db.nivel_upgrade_slots_personagem_favorita(guild_id, user_id)
+    return max(db.beneficios_wishlist_torre(guild_id, user_id)["slots"], legado)
 
 
 def _requisitos(personagem, nivel_personagem):
@@ -144,11 +152,14 @@ def listar(guild_id, user_id):
         item = {
             "slot": slot, "personagem": None, "power_natural": None, "power_atual": None,
             "proximo_fortalecimento": None, "requisitos_ascensao": None,
-            "elegivel_ascensao": False, "proxima_ascensao": None,
+            "elegivel_ascensao": False, "proxima_ascensao": None, "adquirida": False,
         }
         if personagem_id is not None:
             personagem = db.personagem_por_id(personagem_id)
             dono = db.dono_do_personagem(guild_id, personagem_id)
+            if personagem is not None:
+                item["personagem"] = personagem
+                item["adquirida"] = dono == str(user_id)
             if personagem is not None and dono == str(user_id):
                 personagem = _com_vinculo(guild_id, user_id, personagem)
                 nivel_personagem = db.nivel_personagem(guild_id, user_id, personagem_id)
@@ -176,22 +187,24 @@ def listar(guild_id, user_id):
 
 def definir_personagem(guild_id, user_id, slot, personagem_id):
     """Escolhe (`personagem_id` truthy) ou esvazia (`personagem_id=None`)
-    um slot - valida faixa do slot contra os disponíveis e posse da
-    personagem (nunca deixa favoritar algo que não é seu). NUNCA toca
+    um slot - valida faixa do slot contra os disponíveis. A personagem pode
+    ainda não ter sido adquirida; nesse caso ela é um alvo de roll. NUNCA toca
     Fortalecimento/Ascensão do slot (`db.definir_personagem_favorita` já
     garante isso). Devolve `(ok: bool, mensagem: str)`."""
     disponiveis = slots_disponiveis(guild_id, user_id)
     if not (1 <= slot <= disponiveis):
-        return False, f"Você só tem {disponiveis} slot(s) de Waifu disponível(is)."
+        return False, f"Você só tem {disponiveis} slot(s) de Wishlist disponível(is)."
     if personagem_id is not None:
         personagem = db.personagem_por_id(personagem_id)
         if personagem is None:
             return False, "Não achei nenhuma personagem com esse #id."
-        if db.dono_do_personagem(guild_id, personagem_id) != str(user_id):
-            return False, "Essa personagem não é sua nesse servidor."
+        ocupados = db.personagens_favoritas_do_jogador(guild_id, user_id)
+        if any(linha["slot"] != slot and linha["personagem_id"] == personagem_id for linha in ocupados):
+            return False, "Essa personagem já ocupa outro slot da Wishlist."
     db.definir_personagem_favorita(guild_id, user_id, slot, personagem_id)
     if personagem_id is not None:
-        return True, f"**{personagem['nome']}** definida como Waifu no slot {slot}."
+        adquirida = db.dono_do_personagem(guild_id, personagem_id) == str(user_id)
+        return True, f"**{personagem['nome']}** definida na Wishlist no slot {slot}." + (" 🎴 Já adquirida." if adquirida else " 🎯 Vai aparecer nos rolls quando a Wishlist ativar.")
     return True, f"Slot {slot} esvaziado."
 
 
@@ -226,7 +239,9 @@ def fortalecer_ate(guild_id, user_id, slot, indice_alvo):
     slots = {linha["slot"]: linha for linha in db.personagens_favoritas_do_jogador(guild_id, user_id)}
     linha = slots.get(slot)
     if linha is None or linha["personagem_id"] is None:
-        return False, "Esse slot não tem nenhuma Waifu."
+        return False, "Esse slot não tem nenhuma personagem na Wishlist."
+    if db.dono_do_personagem(guild_id, linha["personagem_id"]) != str(user_id):
+        return False, "Adquira essa personagem antes de usar Fortalecimento."
     personagem = db.personagem_por_id(linha["personagem_id"])
     bitmask = linha["fortalecimento_bitmask"]
     _atual, indice_proximo = _estado_fortalecimento(personagem["popularidade"], bitmask)
@@ -245,14 +260,18 @@ def fortalecer_ate(guild_id, user_id, slot, indice_alvo):
     return True, f"💪 Fortalecido {patamares_comprados} patamar(es)! Chegou em {hi} no slot {slot} (custou {db.fmt_numero(custo_total)} Soulstone)."
 
 
-def ascender(guild_id, user_id, slot):
-    """Compra a PRÓXIMA Ascensão do slot - exige o ocupante atual elegível
-    (Fortalecimento completo + Nível/Afinidade/Soulmate no teto). Devolve
-    `(ok: bool, mensagem: str)`."""
+def ascender_ate(guild_id, user_id, slot, nivel_alvo):
+    """Compra Ascensões em sequência até ``nivel_alvo``.
+
+    Exige o ocupante elegível (Fortalecimento completo + Nível/Afinidade/
+    Soulmate no teto) e debita o custo acumulado uma única vez.
+    """
     slots = {linha["slot"]: linha for linha in db.personagens_favoritas_do_jogador(guild_id, user_id)}
     linha = slots.get(slot)
     if linha is None or linha["personagem_id"] is None:
-        return False, "Esse slot não tem nenhuma Waifu."
+        return False, "Esse slot não tem nenhuma personagem na Wishlist."
+    if db.dono_do_personagem(guild_id, linha["personagem_id"]) != str(user_id):
+        return False, "Adquira essa personagem antes de usar Ascensão."
     personagem_id = linha["personagem_id"]
     personagem = _com_vinculo(guild_id, user_id, db.personagem_por_id(personagem_id))
     nivel_personagem = db.nivel_personagem(guild_id, user_id, personagem_id)
@@ -261,11 +280,25 @@ def ascender(guild_id, user_id, slot):
         return False, "Essa personagem ainda não completou o Fortalecimento (1000) - termine antes de Ascender."
     if not elegivel_ascensao(personagem, nivel_personagem, power_atual):
         return False, "Precisa de Nível máximo, Afinidade máxima e Soulmate pra usar Ascensão nesse slot."
-    proximo_nivel = linha["nivel_ascensao"] + 1
-    custo = custo_ascensao(proximo_nivel)
-    if db.saldo_soulstone(guild_id, user_id) < custo:
-        return False, f"Custa {db.fmt_numero(custo)} Soulstone e você não tem o suficiente."
-    db.creditar_soulstone(guild_id, user_id, -custo, "ascensao_personagem_favorita", f"slot {slot} nível {proximo_nivel}")
-    db.incrementar_ascensao_personagem_favorita(guild_id, user_id, slot)
-    novo_power = 1000 + proximo_nivel * BONUS_POWER_POR_ASCENSAO
-    return True, f"✨ Ascendido! Power Base do slot {slot} agora é {db.fmt_numero(novo_power)} (custou {db.fmt_numero(custo)} Soulstone)."
+    nivel_atual = linha["nivel_ascensao"]
+    if nivel_alvo <= nivel_atual:
+        return False, "Ascensão-alvo inválida - tenta abrir o dropdown de novo."
+    custo_total = custo_ascender_ate(nivel_atual, nivel_alvo)
+    if db.saldo_soulstone(guild_id, user_id) < custo_total:
+        return False, f"Custa {db.fmt_numero(custo_total)} Soulstone no total e você não tem o suficiente."
+    quantidade = nivel_alvo - nivel_atual
+    db.creditar_soulstone(
+        guild_id, user_id, -custo_total, "ascensao_personagem_favorita",
+        f"slot {slot} ascensão {nivel_atual}->{nivel_alvo}",
+    )
+    db.incrementar_ascensao_personagem_favorita(guild_id, user_id, slot, quantidade)
+    novo_power = 1000 + nivel_alvo * BONUS_POWER_POR_ASCENSAO
+    return True, f"✨ Ascendido {quantidade} nível(is)! Power Base do slot {slot} agora é {db.fmt_numero(novo_power)} (custou {db.fmt_numero(custo_total)} Soulstone)."
+
+
+def ascender(guild_id, user_id, slot):
+    """Compatibilidade para chamadas antigas: compra uma única Ascensão."""
+    slots = {linha["slot"]: linha for linha in db.personagens_favoritas_do_jogador(guild_id, user_id)}
+    linha = slots.get(slot)
+    nivel_atual = linha["nivel_ascensao"] if linha else 0
+    return ascender_ate(guild_id, user_id, slot, nivel_atual + 1)

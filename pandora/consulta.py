@@ -128,7 +128,7 @@ class ViewColecao(discord.ui.View):
     `/colecao`/wishlist); `/populares` passa `linha_populares`."""
 
     def __init__(self, titulo, personagens, pagina=0, formatador_linha=None):
-        super().__init__(timeout=180)
+        super().__init__(timeout=900)
         self._titulo = titulo
         self._personagens = personagens
         self._pagina = pagina

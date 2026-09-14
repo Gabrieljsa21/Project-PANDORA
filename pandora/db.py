@@ -2,10 +2,10 @@
 """Persistência do Colecionador (gacha estilo Mudae) via SQLite (`sqlite3` da
 stdlib, sem dependência nova) - EXTRAÍDO do Project-ERIS em 2026-08-29 (era
 `eris/db.py`, banco `data/eris.db` - ver `eris.config`/histórico completo em
-`CHANGELOG.md`/`ARQUITETURA.md` do ERIS). Banco PRÓPRIO (`data/pandora.db`,
+`CHANGELOG.md`/`docs/ARQUITETURA.md` do ERIS). Banco PRÓPRIO (`data/pandora.db`,
 `pandora.config.CAMINHO_BANCO`) - não compartilha arquivo com o `eris.db`
 (que ficou só com o núcleo do bot: donos/roteamento/auditoria/cache de
-guilds). Ver "Extraído do Project-ERIS" em `ARQUITETURA.md` deste repo pro
+guilds). Ver "Extraído do Project-ERIS" em `docs/ARQUITETURA.md` deste repo pro
 motivo da extração (biblioteca Python local, sem processo/HTTP próprio -
 diferente do padrão MOIRAI/ECHO - decisão explícita: todo clique de roll/
 claim/troca cai no orçamento de 3s do Discord, um satélite HTTP colocaria
@@ -13,6 +13,7 @@ uma chamada de rede em cima de CADA clique)."""
 import json
 import os
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -140,9 +141,11 @@ CREATE TABLE IF NOT EXISTS colecao_configuracao_guild (
     ciclo_rolls_minutos INTEGER NOT NULL DEFAULT 60,
     claims_por_ciclo INTEGER NOT NULL DEFAULT 1,
     ciclo_claims_minutos INTEGER NOT NULL DEFAULT 60,
-    duracao_card_segundos INTEGER NOT NULL DEFAULT 3600,
+    duracao_card_segundos INTEGER NOT NULL DEFAULT 900,
     max_rolls_por_comando INTEGER NOT NULL DEFAULT 10,
-    chance_wish_roll REAL NOT NULL DEFAULT 0.20
+    chance_wish_roll REAL NOT NULL DEFAULT 0.20,
+    teto_bonus_rolls_progressao INTEGER NOT NULL DEFAULT 100,
+    teto_bonus_claims_progressao INTEGER NOT NULL DEFAULT 10
 );
 
 -- Dono único por personagem POR SERVIDOR (decisão do usuário: nada de
@@ -250,7 +253,7 @@ CREATE INDEX IF NOT EXISTS idx_colecao_soulstone_ledger_usuario ON colecao_souls
 -- uma tabela associativa própria - baixa cardinalidade por proposta, no
 -- máximo algumas personagens de cada lado). SEM reserva ativa de recursos
 -- durante a proposta (simplificação deliberada pra escala pessoal - ver
--- ARQUITETURA.md) - tudo é revalidado (dono ainda é dono, saldo ainda
+-- docs/ARQUITETURA.md) - tudo é revalidado (dono ainda é dono, saldo ainda
 -- alcança) no momento do aceite, nunca confiando só no que a proposta dizia
 -- na hora de criar.
 CREATE TABLE IF NOT EXISTS colecao_troca_proposta (
@@ -539,6 +542,26 @@ CREATE TABLE IF NOT EXISTS colecao_progressao_marcos (
     PRIMARY KEY (guild_id, user_id)
 );
 
+-- Ledger de XP de Progressão (2026-09-07, pedido do usuário: "traz um
+-- botao de progressao, mostrando as fontes de xp acumaladas ate entao") -
+-- mesma estrutura do ledger de WiShards/Soulstone (`colecao_wishards_
+-- ledger`/`colecao_soulstone_ledger` acima) - só criado agora, então só
+-- soma XP creditado a PARTIR de hoje pra frente (XP de antes desta tabela
+-- existir não tem como ser atribuído a uma origem retroativamente).
+CREATE TABLE IF NOT EXISTS colecao_xp_progressao_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    quantidade INTEGER NOT NULL,
+    origem TEXT NOT NULL,
+    motivo TEXT,
+    referencia TEXT,
+    nivel_resultante INTEGER NOT NULL,
+    criado_em TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_colecao_xp_progressao_ledger_usuario ON colecao_xp_progressao_ledger (guild_id, user_id);
+
 -- Cidade (2026-08-30, análise do usuário Seção 13 + pedido explícito:
 -- "n iremos setar personagens em funcoes manualmente, sera automatico
 -- com base na classe/profissão") - produção é ACUMULADA NO TEMPO (pull-
@@ -557,9 +580,30 @@ CREATE TABLE IF NOT EXISTS colecao_cidade_estado (
     ultima_producao_em TEXT,
     cp_bonus_militar_fixo REAL NOT NULL DEFAULT 0,
     cp_bonus_arcano_percentual REAL NOT NULL DEFAULT 0,
-    cp_bonus_colecao_fixo REAL NOT NULL DEFAULT 0,
+    bonus_colecao_loot_percentual REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
 );
+
+-- Histórico de produção da Cidade (2026-09-06, pedido do usuário: "meu
+-- farm ta sempre aumentando, seria ate bom manter uns logs disso p vc ter
+-- controle e dar sugestoes no futuro" - qualquer decisão de balance
+-- (preço de upgrade, etc.) baseada num ÚNICO snapshot do momento fica
+-- velha rápido demais numa economia que escala tão rápido; 1 ponto por
+-- visita à Cidade (throttlado, ver `db.registrar_producao_historico`) dá
+-- dado real de TENDÊNCIA ao longo do tempo, não só "quanto produz hoje".
+-- Guild-scoped (mesmo critério de tudo mais - cada servidor é uma
+-- progressão independente).
+CREATE TABLE IF NOT EXISTS colecao_producao_historico (
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    registrado_em TEXT NOT NULL,
+    wishards_por_hora REAL NOT NULL,
+    soulstone_por_hora REAL NOT NULL,
+    xp_por_hora REAL NOT NULL,
+    cp_total REAL NOT NULL,
+    nivel_progressao INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_producao_historico ON colecao_producao_historico (guild_id, user_id, registrado_em);
 
 -- World Boss: Recompensas e Conquistas (2026-09-01, spec completa do
 -- usuário - ver `pandora/conquistas.py`/`pandora/itens.py`) - Conquistas
@@ -740,9 +784,13 @@ _NOVAS_COLUNAS_CONFIG_COLECAO = {
     "ciclo_rolls_minutos": "INTEGER NOT NULL DEFAULT 60",
     "claims_por_ciclo": "INTEGER NOT NULL DEFAULT 1",
     "ciclo_claims_minutos": "INTEGER NOT NULL DEFAULT 60",
-    "duracao_card_segundos": "INTEGER NOT NULL DEFAULT 3600",
+    "duracao_card_segundos": "INTEGER NOT NULL DEFAULT 900",
     "max_rolls_por_comando": "INTEGER NOT NULL DEFAULT 10",
     "chance_wish_roll": "REAL NOT NULL DEFAULT 0.20",
+    # Tetos dos bônus pessoais de ações obtidos pela Progressão. A base
+    # (rolls_por_ciclo/claims_por_ciclo) continua sendo configurada à parte.
+    "teto_bonus_rolls_progressao": "INTEGER NOT NULL DEFAULT 100",
+    "teto_bonus_claims_progressao": "INTEGER NOT NULL DEFAULT 10",
     # 🔥 Canal onde o auto-colecionador (GAIA/ERIS, ver eris/colecao/auto_
     # colecionador.py) anuncia o que reivindicou - NULL = cai no
     # `guild.system_channel` na hora (sem migração pra preencher, ver
@@ -754,6 +802,15 @@ _NOVAS_COLUNAS_CONFIG_COLECAO = {
     # virou config por servidor, DESLIGADO por padrão (`DEFAULT 0`) - um
     # admin que preferir o cooldown de volta liga via `/colecao_admin`.
     "cooldown_batalha_ativo": "INTEGER NOT NULL DEFAULT 0",
+    "cooldown_batalha_horas": "INTEGER NOT NULL DEFAULT 24",
+    "worldboss_ativo": "INTEGER NOT NULL DEFAULT 1",
+    "worldboss_horarios": "TEXT NOT NULL DEFAULT '10,14,18,22'",
+    "worldboss_inscricao_minutos": "INTEGER NOT NULL DEFAULT 10",
+    "worldboss_turno_segundos": "INTEGER NOT NULL DEFAULT 60",
+    "worldboss_limite_turnos": "INTEGER NOT NULL DEFAULT 60",
+    "worldboss_recompensa_wishards": "INTEGER NOT NULL DEFAULT 500",
+    "worldboss_recompensa_xp": "INTEGER NOT NULL DEFAULT 200",
+    "worldboss_recompensa_soulstone": "INTEGER NOT NULL DEFAULT 20",
 }
 
 # 🔥 Defaults quando o servidor nunca configurou nada (`colecao_
@@ -766,11 +823,22 @@ _CONFIG_COLECAO_PADRAO = {
     "ciclo_rolls_minutos": 60,
     "claims_por_ciclo": 1,
     "ciclo_claims_minutos": 60,
-    "duracao_card_segundos": 3600,
+    "duracao_card_segundos": 900,
     "max_rolls_por_comando": 10,
     "chance_wish_roll": 0.20,
+    "teto_bonus_rolls_progressao": 100,
+    "teto_bonus_claims_progressao": 10,
     "canal_anuncio_id": None,
     "cooldown_batalha_ativo": False,
+    "cooldown_batalha_horas": 24,
+    "worldboss_ativo": True,
+    "worldboss_horarios": "10,14,18,22",
+    "worldboss_inscricao_minutos": 10,
+    "worldboss_turno_segundos": 60,
+    "worldboss_limite_turnos": 60,
+    "worldboss_recompensa_wishards": 500,
+    "worldboss_recompensa_xp": 200,
+    "worldboss_recompensa_soulstone": 20,
 }
 
 # 🔥 Tiers de raridade fixos por personagem (1=comum .. 5=lendária),
@@ -873,33 +941,19 @@ def inicializar():
         # devolve exatamente essas pra uma revisão manual separada, depois.
         if "classe_falhou" not in colunas:
             conn.execute("ALTER TABLE colecao_personagens ADD COLUMN classe_falhou INTEGER NOT NULL DEFAULT 0")
-        # 🔥 Prova de Soulmate (2026-08-29, ERIS_power_afinidade_soulmate_
-        # niveis.md) - conteúdo gerado 1x pela GAIA na 1ª vez que a
-        # personagem chega em Afinidade 10 (mesmo padrão de `classe`/
-        # `classe_exibicao`: NULL até então, nunca regenerado depois de
-        # preenchido).
-        #
-        # 🔥 REDESENHADA no mesmo dia (feedback do usuário testando ao vivo
-        # com Hyuga Hinata: "a mensagem não mostra nenhuma escolha... faz o
-        # texto parecer cenográfico, não uma prova de verdade") - `intro`
-        # (narrativa solta seguida direto do botão "Enfrentar") foi
-        # SUBSTITUÍDA por `situacao` + `opcoes` (3 respostas, uma marcada
-        # como a que combina com a personagem - escolher a certa dá um
-        # bônus de chance SÓ NESSA tentativa, nunca garante sucesso
-        # sozinho) - `reacao_acerto`/`reacao_erro` são as falas curtas
-        # mostradas na hora da escolha. `derrota` continua existindo (fala
-        # de quando o jogador perde o RNG em si), só o PROMPT mudou (agora
-        # pede 1 frase curta, sem "dar conselho" - antes soava genérico
-        # demais de tanto se repetir a cada tentativa perdida).
-        if "prova_soulmate_intro" in colunas:
-            conn.execute("ALTER TABLE colecao_personagens DROP COLUMN prova_soulmate_intro")
+        # 🔥 Prova de Soulmate (mini-game antigo, 2026-08-29) REMOVIDA em
+        # 2026-09-14 - virou dead code depois que Afinidade máxima passou a
+        # virar Soulmate automaticamente (`tornar_soulmate`, sem RNG/botão).
+        # Migração de limpeza: descarta as colunas de texto gerado que
+        # sobraram em bancos antigos (suporte a DROP COLUMN exige SQLite
+        # >= 3.35, confirmado no ambiente do projeto).
         for coluna_prova in (
-            "prova_soulmate_nome", "prova_soulmate_descricao", "prova_soulmate_situacao",
-            "prova_soulmate_opcoes", "prova_soulmate_reacao_acerto", "prova_soulmate_reacao_erro",
-            "prova_soulmate_derrota", "prova_soulmate_vitoria",
+            "prova_soulmate_intro", "prova_soulmate_nome", "prova_soulmate_descricao",
+            "prova_soulmate_situacao", "prova_soulmate_opcoes", "prova_soulmate_reacao_acerto",
+            "prova_soulmate_reacao_erro", "prova_soulmate_derrota", "prova_soulmate_vitoria",
         ):
-            if coluna_prova not in colunas:
-                conn.execute(f"ALTER TABLE colecao_personagens ADD COLUMN {coluna_prova} TEXT")
+            if coluna_prova in colunas:
+                conn.execute(f"ALTER TABLE colecao_personagens DROP COLUMN {coluna_prova}")
 
         # 🔥 Migração aditiva (2026-08-29) - `colecao_configuracao_guild` já
         # tinha guilds configuradas só com `nsfw_permitido` antes de virar
@@ -998,19 +1052,17 @@ def inicializar():
         if "canal_id" not in colunas_batalha:
             conn.execute("ALTER TABLE colecao_batalha_desafios ADD COLUMN canal_id TEXT")
 
-        # 🔥 Prova de Soulmate (2026-08-29) - substitui o auto-flag antigo
-        # ("Afinidade 10 == Soulmate", só cosmético `💍`) por uma tentativa de
-        # verdade que o jogador precisa vencer. `is_soulmate` é o status real
-        # (2,0× de multiplicador de Power no futuro, cosméticos `💞` hoje);
-        # `soulmate_tentativas`/`soulmate_ultima_tentativa_em` alimentam a
-        # chance crescente por falha e o cooldown de 1h/personagem.
+        # 🔥 `is_soulmate` (2026-08-29) - status real do vínculo (2,0× de
+        # multiplicador de Power, cosmético `💞`), setado direto por
+        # `tornar_soulmate` quando a Afinidade chega no teto (sem RNG/botão
+        # - a Prova de Soulmate que gerava esse flag por tentativa foi
+        # removida em 2026-09-14, dead code).
         colunas_afinidade = {r["name"] for r in conn.execute("PRAGMA table_info(colecao_afinidade)")}
         if "is_soulmate" not in colunas_afinidade:
             conn.execute("ALTER TABLE colecao_afinidade ADD COLUMN is_soulmate INTEGER NOT NULL DEFAULT 0")
-        if "soulmate_tentativas" not in colunas_afinidade:
-            conn.execute("ALTER TABLE colecao_afinidade ADD COLUMN soulmate_tentativas INTEGER NOT NULL DEFAULT 0")
-        if "soulmate_ultima_tentativa_em" not in colunas_afinidade:
-            conn.execute("ALTER TABLE colecao_afinidade ADD COLUMN soulmate_ultima_tentativa_em TEXT")
+        for coluna_prova in ("soulmate_tentativas", "soulmate_ultima_tentativa_em"):
+            if coluna_prova in colunas_afinidade:
+                conn.execute(f"ALTER TABLE colecao_afinidade DROP COLUMN {coluna_prova}")
         # 🔥 Nível de Personagem (2026-08-30, Torre, ERIS_power_afinidade_
         # soulmate_niveis.md Seção 5) - investimento DELIBERADO do jogador
         # (gasta WiShards, ver `subir_nivel`), 1-10, +50 Power fixo por
@@ -1097,11 +1149,11 @@ def inicializar():
             conn.execute("ALTER TABLE colecao_classes ADD COLUMN funcao_cidade TEXT")
 
         # 🔥 Cidade v2 (2026-08-30, efeitos diferenciados por área) - 3
-        # colunas de snapshot de bônus de CP pra Party, ver `_SCHEMA`
+        # colunas de snapshot da Cidade, ver `_SCHEMA`
         # acima (`colecao_cidade_estado` já existia só com `ultima_
         # producao_em`, criada mais cedo nesta mesma sessão).
         colunas_cidade = {r["name"] for r in conn.execute("PRAGMA table_info(colecao_cidade_estado)")}
-        for coluna_cidade in ("cp_bonus_militar_fixo", "cp_bonus_arcano_percentual", "cp_bonus_colecao_fixo"):
+        for coluna_cidade in ("cp_bonus_militar_fixo", "cp_bonus_arcano_percentual", "bonus_colecao_loot_percentual"):
             if coluna_cidade not in colunas_cidade:
                 conn.execute(f"ALTER TABLE colecao_cidade_estado ADD COLUMN {coluna_cidade} REAL NOT NULL DEFAULT 0")
 
@@ -1174,6 +1226,45 @@ def contar_personagens():
         return conn.execute("SELECT COUNT(*) AS n FROM colecao_personagens").fetchone()["n"]
 
 
+def exportar_classificacao_personagens():
+    """Snapshot de TODA a classificação já feita (via LLM, `gacha.
+    revelar_classe`/`classificar_personagem_colecao`) - `classe`/
+    `classe_exibicao`, indexado por `fonte_id` (id estável do catálogo
+    externo, sobrevive a uma reimportação inteira, diferente do `id`
+    interno). Usado por `scripts/exportar_classificacao_personagens.py`
+    pra gerar um backup VERSIONADO no git (2026-09-14, pedido do usuário:
+    "n quero ter q redefinir as classes de novo" - `raridade` NÃO entra
+    aqui porque é derivada automaticamente por `recalcular_raridade` a
+    cada reimportação, nunca precisa de backup)."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT fonte_id, classe, classe_exibicao FROM colecao_personagens "
+            "WHERE classe IS NOT NULL ORDER BY fonte_id"
+        ).fetchall()
+        return [dict(r) for r in linhas]
+
+
+def aplicar_classificacao_personagens(classificacoes):
+    """Reaplica um snapshot de `exportar_classificacao_personagens` -
+    usado por `scripts/aplicar_classificacao_personagens.py` num banco
+    novo (PC novo, ou banco recriado do zero) depois de reimportar o
+    catálogo bruto (`importar_get_waifu.importar`), pra não perder o
+    trabalho de classificação. Só grava em quem já existe no banco
+    (`fonte_id` desconhecido é ignorado - personagem ainda não
+    importada) e só atualiza `classe`/`classe_exibicao`, nunca mexe em
+    mais nada da personagem. Devolve quantas linhas foram de fato
+    aplicadas (fonte_id encontrado)."""
+    agora_aplicadas = 0
+    with conexao() as conn:
+        for item in classificacoes:
+            cursor = conn.execute(
+                "UPDATE colecao_personagens SET classe = ?, classe_exibicao = ? WHERE fonte_id = ?",
+                (item.get("classe"), item.get("classe_exibicao"), item["fonte_id"]),
+            )
+            agora_aplicadas += cursor.rowcount
+    return agora_aplicadas
+
+
 def nsfw_permitido(guild_id):
     """Sem configuração salva, o padrão é permitido (`pode incluir o NSFW`,
     decisão do usuário) - cada servidor pode desabilitar depois, sem precisar
@@ -1215,8 +1306,19 @@ def obter_configuracao_colecao(guild_id):
         "duracao_card_segundos": linha["duracao_card_segundos"],
         "max_rolls_por_comando": linha["max_rolls_por_comando"],
         "chance_wish_roll": linha["chance_wish_roll"],
+        "teto_bonus_rolls_progressao": linha["teto_bonus_rolls_progressao"],
+        "teto_bonus_claims_progressao": linha["teto_bonus_claims_progressao"],
         "canal_anuncio_id": linha["canal_anuncio_id"],
         "cooldown_batalha_ativo": bool(linha["cooldown_batalha_ativo"]),
+        "cooldown_batalha_horas": linha["cooldown_batalha_horas"],
+        "worldboss_ativo": bool(linha["worldboss_ativo"]),
+        "worldboss_horarios": linha["worldboss_horarios"],
+        "worldboss_inscricao_minutos": linha["worldboss_inscricao_minutos"],
+        "worldboss_turno_segundos": linha["worldboss_turno_segundos"],
+        "worldboss_limite_turnos": linha["worldboss_limite_turnos"],
+        "worldboss_recompensa_wishards": linha["worldboss_recompensa_wishards"],
+        "worldboss_recompensa_xp": linha["worldboss_recompensa_xp"],
+        "worldboss_recompensa_soulstone": linha["worldboss_recompensa_soulstone"],
     }
 
 
@@ -1400,14 +1502,39 @@ def classes_mais_populares(limite=30):
     devolver o mesmo nome de novo mesmo sem ver na lista), e duplicatas/
     quase-sinônimos que escaparem disso são corrigíveis depois com os
     mesmos scripts de reclassificação já usados antes (`reclassificar_
-    taxonomia_*.py`)."""
+    taxonomia_*.py`).
+
+    🔥 "Apoiador" NUNCA aparece aqui (2026-09-06, pedido do usuário: "Apoiador
+    deixa de ser uma classe de destino. Nada é reclassificado para
+    Apoiador... a meta passa a ser [reduzir], e cada revisão só pode tirar
+    personagens dali, nunca colocar novos") - é o balde genérico legado
+    (964 membros, congelados), não deveria mais ser sugerido como opção
+    "popular" pra nenhuma classificação nova (`db.definir_classe_
+    personagem` também recusa a gravação se a GAIA insistir mesmo assim,
+    ver lá - dupla proteção)."""
     with conexao() as conn:
         linhas = conn.execute(
             "SELECT classe, COUNT(*) AS total FROM colecao_personagens "
-            "WHERE classe IS NOT NULL GROUP BY classe ORDER BY total DESC LIMIT ?",
+            "WHERE classe IS NOT NULL AND classe != 'Apoiador' GROUP BY classe ORDER BY total DESC LIMIT ?",
             (limite,),
         ).fetchall()
         return [r["classe"] for r in linhas]
+
+
+def _normalizar_classe(classe):
+    """Forma canônica de comparação (minúsculo, sem acento) - 2026-09-06,
+    achado do usuário auditando o Bônus por Classe ("Idol"/"Ídolo" com 23
+    e 85 personagens respectivamente, tratadas como classes DIFERENTES;
+    "Estrategista"/"Estratégista" fragmentou de novo depois do backfill de
+    2026-09-06 que já tinha consolidado o mesmo par). `classe`/`classes_
+    mais_populares` sempre comparavam por igualdade EXATA de string - a
+    GAIA (`gaia_webhook.pedir_classe_personagem`) não é determinística
+    entre acento/maiúscula pro mesmo conceito, então cada variação virava
+    uma entrada NOVA em `colecao_classes`, perpetuando a fragmentação pra
+    sempre (um backfill manual resolve o passado, mas não impede a
+    próxima classificação de reabrir o mesmo buraco)."""
+    sem_acento = unicodedata.normalize("NFKD", classe).encode("ascii", "ignore").decode("ascii")
+    return sem_acento.strip().lower()
 
 
 def categoria_combate_da_classe(classe):
@@ -1418,6 +1545,21 @@ def categoria_combate_da_classe(classe):
             "SELECT categoria_combate FROM colecao_classes WHERE classe = ?", (classe,),
         ).fetchone()
     return linha["categoria_combate"] if linha else None
+
+
+def _classe_canonica_equivalente(conn, classe):
+    """Varre `colecao_classes` procurando uma entrada JÁ EXISTENTE que seja
+    o mesmo conceito de `classe` ignorando acento/maiúscula (`_normalizar_
+    classe`) - usada por `definir_classe_personagem` ANTES de decidir criar
+    uma classe nova, pra toda variação (nova ou já vista) convergir pra UMA
+    única grafia canônica (a 1ª que existiu), em vez de cada acento
+    diferente virar uma entrada própria pra sempre. `None` se `classe` for
+    realmente inédita (nenhuma equivalente registrada ainda)."""
+    alvo = _normalizar_classe(classe)
+    for linha in conn.execute("SELECT classe, categoria_combate, funcao_cidade FROM colecao_classes"):
+        if _normalizar_classe(linha["classe"]) == alvo:
+            return linha
+    return None
 
 
 def definir_classe_personagem(personagem_id, classe, categoria_combate=None, classe_exibicao=None, funcao_cidade=None):
@@ -1451,11 +1593,41 @@ def definir_classe_personagem(personagem_id, classe, categoria_combate=None, cla
     `categoria_combate` acima (classe conhecida nunca é sobrescrita por
     sugestão nova) - não entra no valor de retorno porque nada no fluxo de
     claim precisa mostrar isso na hora, só a Cidade lê depois via
-    `funcao_cidade_da_classe`."""
+    `funcao_cidade_da_classe`.
+
+    🔥 Convergência por acento/maiúscula (2026-09-06, `_classe_canonica_
+    equivalente`) - ANTES de checar `classe` por igualdade exata, procura
+    uma classe já registrada equivalente ignorando acento/maiúscula; se
+    achar, `classe` vira a grafia JÁ EXISTENTE (nunca cria uma entrada nova
+    pra "Idol" se "Ídolo" já existe) - impede a MESMA fragmentação que já
+    precisou de 2 backfills manuais (`Estrategista`/`Estratégista`,
+    `Idol`/`Ídolo`) de se repetir pra sempre a cada classificação nova.
+
+    🔥 "Apoiador" aposentado como destino de classificação NOVA (2026-09-06,
+    pedido do usuário: "Apoiador deixa de ser uma classe de destino. Nada
+    é reclassificado para Apoiador... a meta passa a ser [reduzir], e
+    cada revisão só pode tirar personagens dali, nunca colocar novos") -
+    se a GAIA insistir em "Apoiador" (mesmo já excluído de `classes_mais_
+    populares`, ela pode "coincidir" o nome de novo sem ver na lista, ver
+    comentário lá) pra uma personagem NUNCA classificada antes, a
+    sugestão é RECUSADA - nada é gravado, a personagem continua com
+    `classe IS NULL` (pendente, `/pandora_admin validar_classes` tenta de
+    novo depois). Os 964 membros que Apoiador já tinha continuam
+    intocados - esta função só roda pra classificação NOVA (`revelar_
+    classe` só chama aqui quando `personagem.get("classe")` ainda é
+    vazio). Devolve `(recusado: bool, categoria_combate)` - `recusado=
+    True` sinaliza que NADA foi gravado, quem chama (`gacha.revelar_
+    classe`) trata igual a "GAIA não decidiu nada"."""
     with conexao() as conn:
         canonica = conn.execute(
             "SELECT categoria_combate, funcao_cidade FROM colecao_classes WHERE classe = ?", (classe,),
         ).fetchone()
+        if canonica is None:
+            canonica = _classe_canonica_equivalente(conn, classe)
+            if canonica is not None:
+                classe = canonica["classe"]
+        if classe == "Apoiador":
+            return True, None
         if canonica is not None:
             categoria_combate = canonica["categoria_combate"]
         elif categoria_combate is not None:
@@ -1468,7 +1640,7 @@ def definir_classe_personagem(personagem_id, classe, categoria_combate=None, cla
             "UPDATE colecao_personagens SET classe = ?, classe_exibicao = ? WHERE id = ? AND classe IS NULL",
             (classe, classe_exibicao or classe, personagem_id),
         )
-    return categoria_combate
+    return False, categoria_combate
 
 
 def personagens_possuidos_sem_classe(limite=20, apenas_falhas=False):
@@ -1516,6 +1688,18 @@ def contar_personagens_possuidos_sem_classe(apenas_falhas=False):
             f"JOIN colecao_propriedade c ON c.personagem_id = p.id WHERE p.classe IS NULL AND {filtro_falha}",
         ).fetchone()
     return linha["total"]
+
+
+def personagens_nao_adquiridos_sem_classe(limite=100):
+    """Fila global do catálogo sem classe e sem qualquer propriedade."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT p.id, p.nome, p.serie, p.genero, p.descricao FROM colecao_personagens p "
+            "WHERE p.ativo = 1 AND p.classe IS NULL AND NOT EXISTS "
+            "(SELECT 1 FROM colecao_propriedade c WHERE c.personagem_id = p.id) ORDER BY p.id LIMIT ?",
+            (limite,),
+        ).fetchall()
+    return [dict(r) for r in linhas]
 
 
 def marcar_falha_classificacao(personagem_id):
@@ -1600,7 +1784,7 @@ def divorciar(guild_id, personagem_id, user_id):
     nivel_atingido = nivel_personagem(guild_id, user_id, personagem_id)
     eh_soulmate = is_soulmate(guild_id, user_id, personagem_id)
     xp = personagem["raridade"] * 10 + nivel_atingido * 15 + (50 if eh_soulmate else pontos_afinidade * 3)
-    creditar_xp_progressao(guild_id, user_id, xp)
+    creditar_xp_progressao(guild_id, user_id, xp, "divorcio", personagem["nome"], str(personagem_id))
     return True, recompensa, xp
 
 
@@ -1964,19 +2148,22 @@ def definir_auto_defesa_batalha(guild_id, user_id, ativa):
 # 5 base + 20 níveis de upgrade cabem tudo num select só de escolher slot
 # (ver `paineis._ViewSeriesFavoritas`, que trocou de 1 botão por slot -
 # nunca caberia 25 botões nas 5 linhas do Discord - pra 1 select só).
-# Preço "primeiro palpite" (mesma régua de sempre, barato -> extremamente
-# caro) continuando a curva de crescimento dos 5 primeiros níveis.
+# Slots 1-5 são gratuitos; cada upgrade libera o próximo slot (6-25) por
+# uma tabela linear de 5M a 100M WiShards.
 PRECOS_UPGRADE_SLOT_SERIE_FAVORITA = {
-    1: 5_000, 2: 15_000, 3: 40_000, 4: 100_000, 5: 250_000,
-    6: 600_000, 7: 1_400_000, 8: 3_000_000, 9: 6_500_000, 10: 14_000_000,
-    11: 30_000_000, 12: 60_000_000, 13: 125_000_000, 14: 250_000_000, 15: 500_000_000,
-    16: 1_000_000_000, 17: 2_000_000_000, 18: 4_000_000_000, 19: 8_000_000_000, 20: 16_000_000_000,
+    nivel: nivel * 5_000_000
+    for nivel in range(1, 21)
 }
 SLOTS_BASE_SERIE_FAVORITA = 5
 NIVEL_MAXIMO_UPGRADE_SLOT_SERIE_FAVORITA = 20
 
 
 def comprar_slot_serie_favorita(guild_id, user_id):
+    """Desativado: slots de Série Favorita vêm da Torre."""
+    return False, "Slots de Série Favorita são desbloqueados pela Torre, igual à Wishlist."
+
+
+def _comprar_slot_serie_favorita_legado(guild_id, user_id):
     """Mesmo padrão de `comprar_upgrade_rolls`/`comprar_upgrade_claims` -
     preço escalonado (`PRECOS_UPGRADE_SLOT_SERIE_FAVORITA`, "primeiro
     palpite", igual toda constante nova - barato -> extremamente caro,
@@ -2110,25 +2297,18 @@ def marcar_patamar_fortalecimento(guild_id, user_id, slot, indice):
         )
 
 
-def incrementar_ascensao_personagem_favorita(guild_id, user_id, slot):
+def incrementar_ascensao_personagem_favorita(guild_id, user_id, slot, quantidade=1):
+    """Acrescenta uma ou mais Ascensões já validadas pelo domínio."""
     with conexao() as conn:
         conn.execute(
-            "UPDATE colecao_personagens_favoritas SET nivel_ascensao = nivel_ascensao + 1 "
+            "UPDATE colecao_personagens_favoritas SET nivel_ascensao = nivel_ascensao + ? "
             "WHERE guild_id = ? AND user_id = ? AND slot = ?",
-            (str(guild_id), str(user_id), slot),
+            (quantidade, str(guild_id), str(user_id), slot),
         )
 
 
-# 🔥 Mesma curva de preço de `PRECOS_UPGRADE_SLOT_SERIE_FAVORITA` (WiShards,
-# confirmado com o usuário: "mesma moeda/curva de Série Favorita, não
-# Soulstone") - 5 base + até 20 pagos = 25 no total, mesmo teto de opções de
-# 1 único `discord.ui.Select`.
-PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA = {
-    1: 5_000, 2: 15_000, 3: 40_000, 4: 100_000, 5: 250_000,
-    6: 600_000, 7: 1_400_000, 8: 3_000_000, 9: 6_500_000, 10: 14_000_000,
-    11: 30_000_000, 12: 60_000_000, 13: 125_000_000, 14: 250_000_000, 15: 500_000_000,
-    16: 1_000_000_000, 17: 2_000_000_000, 18: 4_000_000_000, 19: 8_000_000_000, 20: 16_000_000_000,
-}
+# Mesma tabela de Série Favorita: WiShards, 5 base + 20 pagos = 25 slots.
+PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA = PRECOS_UPGRADE_SLOT_SERIE_FAVORITA
 SLOTS_BASE_PERSONAGEM_FAVORITA = 5
 NIVEL_MAXIMO_UPGRADE_SLOT_PERSONAGEM_FAVORITA = 20
 
@@ -2188,9 +2368,8 @@ def afinidade(guild_id, user_id, personagem_id):
 
 
 def is_soulmate(guild_id, user_id, personagem_id):
-    """Status REAL de Soulmate (2026-08-29, Prova de Soulmate) - só vira
-    True depois de vencer a Prova (`registrar_tentativa_soulmate`), nunca
-    mais um auto-flag de "afinidade >= 10". Usado por `gacha._resolver_
+    """Status REAL de Soulmate (2026-08-29) - vira True via `tornar_soulmate`
+    quando a Afinidade chega no teto (sem RNG). Usado por `gacha._resolver_
     resultado` pra decidir o texto de reencontro (`montar_embed`)."""
     with conexao() as conn:
         linha = conn.execute(
@@ -2231,68 +2410,14 @@ def incrementar_afinidade(guild_id, user_id, personagem_id):
         return novo
 
 
-def personagens_prontas_para_prova(guild_id, user_id):
-    """Candidatas à Prova de Soulmate: Afinidade 10 E ainda não é Soulmate -
-    alimenta o select do botão "💞 Prova de Soulmate" do hub `/pandora` (ver
-    `pandora/paineis.py::ViewHubWaifu`)."""
-    with conexao() as conn:
-        linhas = conn.execute(
-            "SELECT p.*, a.afinidade, a.soulmate_tentativas, a.soulmate_ultima_tentativa_em "
-            "FROM colecao_afinidade a JOIN colecao_personagens p ON p.id = a.personagem_id "
-            "WHERE a.guild_id = ? AND a.user_id = ? AND a.afinidade >= 10 AND a.is_soulmate = 0 "
-            "ORDER BY p.nome",
-            (str(guild_id), str(user_id)),
-        ).fetchall()
-        return [dict(r) for r in linhas]
-
-
-def definir_textos_prova_soulmate(personagem_id, nome, descricao, situacao, opcoes_json, reacao_acerto, reacao_erro, derrota, vitoria):
-    """Só grava se ainda não tinha (`WHERE prova_soulmate_opcoes IS NULL`,
-    não mais `prova_soulmate_nome` - 2026-08-29, achado ao redesenhar:
-    personagens já testadas no schema ANTIGO tinham `nome` preenchido mas
-    nenhuma `opcoes`, e o guard antigo travava a regeneração pra sempre;
-    checar a coluna NOVA faz o cache se auto-curar sozinho pra quem já
-    tinha dado a Prova antes do redesenho, sem precisar de UPDATE manual).
-    `opcoes_json` é `prova_soulmate_opcoes` já serializado (`json.dumps`) -
-    mesmo padrão de cache 1x-pra-sempre de `definir_classe_personagem`."""
-    with conexao() as conn:
-        conn.execute(
-            "UPDATE colecao_personagens SET prova_soulmate_nome = ?, prova_soulmate_descricao = ?, "
-            "prova_soulmate_situacao = ?, prova_soulmate_opcoes = ?, prova_soulmate_reacao_acerto = ?, "
-            "prova_soulmate_reacao_erro = ?, prova_soulmate_derrota = ?, prova_soulmate_vitoria = ? "
-            "WHERE id = ? AND prova_soulmate_opcoes IS NULL",
-            (nome, descricao, situacao, opcoes_json, reacao_acerto, reacao_erro, derrota, vitoria, personagem_id),
-        )
-
-
-def registrar_tentativa_soulmate(guild_id, user_id, personagem_id, venceu, agora_iso):
-    """Vitória: `is_soulmate = 1`, zera `soulmate_tentativas` (não importa
-    mais depois de virar Soulmate). Derrota: incrementa `soulmate_tentativas`
-    (alimenta a chance crescente por falha e o pity) e marca
-    `soulmate_ultima_tentativa_em` (cooldown de 1h/personagem)."""
-    with conexao() as conn:
-        if venceu:
-            conn.execute(
-                "UPDATE colecao_afinidade SET is_soulmate = 1, soulmate_tentativas = 0, "
-                "soulmate_ultima_tentativa_em = ? WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
-                (agora_iso, str(guild_id), str(user_id), personagem_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE colecao_afinidade SET soulmate_tentativas = soulmate_tentativas + 1, "
-                "soulmate_ultima_tentativa_em = ? WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
-                (agora_iso, str(guild_id), str(user_id), personagem_id),
-            )
-
-
 def definir_afinidade_admin(guild_id, user_id, personagem_id, valor):
     """Ferramenta de admin (2026-08-29, pedido do usuário: "n existe ninguem
-    com afinidade 10, de comando de admin p editar" - testar a Prova de
-    Soulmate ao vivo sem esperar 9 reencontros de verdade) - ajusta a coluna
-    `afinidade` DIRETO, sem passar pelo incremento normal de +1 por
+    com afinidade 10, de comando de admin p editar" - testar o teto de
+    Afinidade ao vivo sem esperar 9 reencontros de verdade) - ajusta a
+    coluna `afinidade` DIRETO, sem passar pelo incremento normal de +1 por
     reencontro (`incrementar_afinidade`). `valor` é travado em 0-10, mesmo
-    teto natural da mecânica. Não mexe em `is_soulmate`/`soulmate_
-    tentativas` - só a Afinidade em si."""
+    teto natural da mecânica. Não mexe em `is_soulmate` - só a Afinidade em
+    si."""
     valor = max(0, min(10, valor))
     with conexao() as conn:
         conn.execute(
@@ -2374,7 +2499,7 @@ def subir_nivel_ate(guild_id, user_id, personagem_id, nivel_alvo):
             (str(guild_id), str(user_id), personagem_id, nivel_alvo),
         )
     xp = custo // 5
-    creditar_xp_progressao(guild_id, user_id, xp)
+    creditar_xp_progressao(guild_id, user_id, xp, "upar_nivel_personagem", personagem["nome"], str(personagem_id))
     return True, f"{personagem['nome']} subiu pro nível {nivel_alvo}! (custou {fmt_numero(custo)} WiShards, +{fmt_numero(xp)} XP de Progressão)"
 
 
@@ -2434,11 +2559,10 @@ def subir_afinidade_ate(guild_id, user_id, personagem_id, afinidade_alvo):
 
 def tornar_soulmate(guild_id, user_id, personagem_id):
     """Marca `is_soulmate = 1` direto - função NOVA e mínima (2026-08-30),
-    DESACOPLADA de `registrar_tentativa_soulmate` (que ficou dormente com
-    a "Prova de Soulmate" antiga, junto de campos irrelevantes agora tipo
-    `soulmate_tentativas`). Chamada só por `gacha._resolver_resultado`
-    quando um reencontro acontece numa personagem já em Afinidade máxima
-    e ainda não Soulmate - vira Soulmate ali mesmo, sem RNG."""
+    já desacoplada desde então da antiga "Prova de Soulmate" (removida por
+    completo em 2026-09-14, dead code). Chamada só por `gacha._resolver_
+    resultado` quando um reencontro acontece numa personagem já em Afinidade
+    máxima e ainda não Soulmate - vira Soulmate ali mesmo, sem RNG."""
     with conexao() as conn:
         conn.execute(
             "UPDATE colecao_afinidade SET is_soulmate = 1 WHERE guild_id = ? AND user_id = ? AND personagem_id = ?",
@@ -2602,7 +2726,9 @@ def resetar_rolls_admin(guild_id, user_id):
     na hora em vez de esperar o ciclo atual vencer. Devolve o novo limite
     (quantos rolls a pessoa passou a ter)."""
     config = obter_configuracao_colecao(guild_id)
-    limite_rolls = config["rolls_por_ciclo"] + nivel_upgrade_rolls(guild_id, user_id) * BONUS_ROLLS_POR_NIVEL
+    bonus_rolls, _bonus_claims = bonus_permanente_total(guild_id, user_id)
+    bonus_progressao_rolls, _bonus_progressao_claims = bonus_acoes_por_progressao(guild_id, user_id, config)
+    limite_rolls = config["rolls_por_ciclo"] + bonus_progressao_rolls + bonus_rolls
     agora = datetime.now(timezone.utc)
     fim_ciclo = _fim_ciclo_fixo(agora, config["ciclo_rolls_minutos"])
     with conexao() as conn:
@@ -2620,9 +2746,11 @@ def resetar_claims_admin(guild_id, user_id):
     (`/colecao_admin resetar_claims`, 2026-08-29, pedido do usuário
     "comando p resetar claim tbm"). Devolve o novo limite (quantos claims
     a pessoa passou a ter, já incluindo o upgrade permanente dela -
-    `nivel_upgrade_claims`)."""
+    `bonus_acoes_por_progressao`)."""
     config = obter_configuracao_colecao(guild_id)
-    limite_claims = config["claims_por_ciclo"] + nivel_upgrade_claims(guild_id, user_id) * BONUS_CLAIMS_POR_NIVEL
+    _bonus_rolls, bonus_claims = bonus_permanente_total(guild_id, user_id)
+    _bonus_progressao_rolls, bonus_progressao_claims = bonus_acoes_por_progressao(guild_id, user_id, config)
+    limite_claims = config["claims_por_ciclo"] + bonus_progressao_claims + bonus_claims
     agora = datetime.now(timezone.utc)
     fim_ciclo = _fim_ciclo_fixo(agora, config["ciclo_claims_minutos"])
     with conexao() as conn:
@@ -2922,6 +3050,21 @@ def reivindicar_diaria(guild_id, user_id):
     return True
 
 
+def bonus_acoes_por_progressao(guild_id, user_id, config=None):
+    """Bônus pessoal de ações conquistado pela Progressão.
+
+    Em cada bloco de 25 níveis, os níveis 5, 10, 15 e 20 concedem +5
+    rolls por ciclo; o nível 25 concede +1 claim por ciclo. Os dois totais
+    respeitam os tetos definidos pelo administrador do servidor.
+    """
+    config = config or obter_configuracao_colecao(guild_id)
+    nivel = progressao_conta(guild_id, user_id)["nivel"]
+    recompensas_roll = (nivel // 5) - (nivel // 25)
+    bonus_rolls = min(config["teto_bonus_rolls_progressao"], recompensas_roll * 5)
+    bonus_claims = min(config["teto_bonus_claims_progressao"], nivel // 25)
+    return bonus_rolls, bonus_claims
+
+
 def reivindicar_diaria_com_recompensa(guild_id, user_id):
     """Resgata a Recompensa Diária + credita `RECOMPENSA_DIARIA_WISHARDS ×
     nível de Progressão` em WiShards (2026-09-02, pedido do usuário:
@@ -2987,12 +3130,36 @@ def series_bloqueadas(guild_id):
 # manter tal como está -, só chamando essas funções por baixo agora.
 # --------------------------------------------------------------------------
 
+SLOTS_BASE_WISHLIST = 5
+SLOTS_MAXIMO_WISHLIST = 25
+ANDAR_MAXIMO_BONUS_WISHLIST = 500
+
+
+def beneficios_wishlist_torre(guild_id, user_id):
+    """Recompensas permanentes da Torre para a Wishlist.
+
+    ``andar_atual`` é o próximo andar a tentar; portanto, as recompensas
+    usam somente os andares já vencidos. A cada 25 vitórias há um slot,
+    até 25 no total. A cada cinco vitórias que não fecha um bloco de 25 há
+    +0,25 ponto percentual de chance, até +20 pontos no andar 500.
+    """
+    andares_vencidos = max(0, andar_atual_torre(guild_id, user_id) - 1)
+    andares_considerados = min(andares_vencidos, ANDAR_MAXIMO_BONUS_WISHLIST)
+    slots = min(SLOTS_MAXIMO_WISHLIST, SLOTS_BASE_WISHLIST + andares_considerados // 25)
+    marcos_de_cinco = andares_considerados // 5
+    marcos_de_vinte_e_cinco = andares_considerados // 25
+    bonus_chance = (marcos_de_cinco - marcos_de_vinte_e_cinco) * 0.0025
+    return {"andares_vencidos": andares_vencidos, "slots": slots, "bonus_chance": bonus_chance}
+
+
 def wishlist_adicionar(guild_id, user_id, personagem_id):
+    """Adiciona aos Favoritos pessoais, sem limite e sem efeito em rolls."""
     with conexao() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO colecao_favoritas (guild_id, user_id, personagem_id) VALUES (?, ?, ?)",
             (str(guild_id), str(user_id), personagem_id),
         )
+    return True, "Personagem adicionada aos Favoritos."
 
 
 def wishlist_remover(guild_id, user_id, personagem_id):
@@ -3054,7 +3221,7 @@ def wishlist_listar(guild_id, user_id):
         return [dict(r) for r in linhas]
 
 
-def wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw):
+def wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw, raridade=None):
     """Itens da Wishlist que ainda não têm dono NESSE servidor - candidatos
     reais pro "wish roll" (`gacha._sortear_um`) - a lista aumenta
     moderadamente a chance, nunca garante o aparecimento (PLANO_COLECAO_
@@ -3065,10 +3232,31 @@ def wishlist_disponiveis_no_guild(guild_id, user_id, permitir_nsfw):
     params = [str(guild_id), str(user_id)]
     if not permitir_nsfw:
         filtros.append("p.nsfw = 0")
+    if raridade is not None:
+        filtros.append("p.raridade = ?")
+        params.append(raridade)
     filtros.append("p.id NOT IN (SELECT personagem_id FROM colecao_propriedade WHERE guild_id = ?)")
     params.append(str(guild_id))
     sql = (
         "SELECT p.id FROM colecao_favoritas f JOIN colecao_personagens p ON p.id = f.personagem_id "
+        f"WHERE {' AND '.join(filtros)}"
+    )
+    with conexao() as conn:
+        return [r["id"] for r in conn.execute(sql, params).fetchall()]
+
+
+def wishlist_slots_disponiveis_no_guild(guild_id, user_id, permitir_nsfw, raridade=None):
+    """Alvos da Wishlist por slots, inclusive personagens já adquiridas."""
+    filtros = ["w.guild_id = ?", "w.user_id = ?", "w.personagem_id IS NOT NULL", "p.ativo = 1"]
+    params = [str(guild_id), str(user_id)]
+    if not permitir_nsfw:
+        filtros.append("p.nsfw = 0")
+    if raridade is not None:
+        filtros.append("p.raridade = ?")
+        params.append(raridade)
+    sql = (
+        "SELECT DISTINCT p.id FROM colecao_personagens_favoritas w "
+        "JOIN colecao_personagens p ON p.id = w.personagem_id "
         f"WHERE {' AND '.join(filtros)}"
     )
     with conexao() as conn:
@@ -3197,7 +3385,8 @@ def cooldown_batalha_ok(guild_id, desafiante_id, defensor_id):
     if linha is None:
         return True
     ultimo = datetime.fromisoformat(linha["ultimo_desafio_em"])
-    return (datetime.now(timezone.utc) - ultimo) >= timedelta(hours=24)
+    horas = obter_configuracao_colecao(guild_id)["cooldown_batalha_horas"]
+    return horas <= 0 or (datetime.now(timezone.utc) - ultimo) >= timedelta(hours=horas)
 
 
 def registrar_desafio_cooldown(guild_id, desafiante_id, defensor_id):
@@ -3355,8 +3544,8 @@ def cards_pendentes(guild_id, raridade=None):
 
 
 # --------------------------------------------------------------------------
-# Party e Vitrine - até 5 posições cada, mesma tabela (`tipo` distingue,
-# Seções 15/17). Party ainda não tem Torre pra jogar, mas já protege contra
+# Formações de até 5 posições (Party/Fusão; `tipo` distingue) na mesma tabela.
+# Party ainda não tem Torre pra jogar, mas já protege contra
 # Merge (bloqueio duro em `eris/bot.py::_merge`, checado via `esta_na_party`)
 # - "personagens da Party ficam protegidas contra ações destrutivas
 # automáticas" vale desde já, não precisa esperar a Torre existir.
@@ -3481,6 +3670,95 @@ def avancar_andar_torre(guild_id, user_id):
     return novo
 
 
+def registrar_vitorias_torre_em_lote(guild_id, user_id, vitorias, andar_final, party_final_ids):
+    """Persiste uma sequência já validada de vitórias da Torre em UMA
+    transação.
+
+    ``subir_max`` decide as composições e valida os andares em memória; este
+    método só grava o resultado. Mantém uma linha de ledger por andar para
+    WiShards e XP, mas evita abrir/confirmar quatro conexões SQLite por
+    vitória. A Party é gravada uma vez, com a última composição vencedora.
+    """
+    if not vitorias:
+        return
+    agora = datetime.now(timezone.utc).isoformat()
+    guild_id, user_id = str(guild_id), str(user_id)
+    with conexao() as conn:
+        saldo_linha = conn.execute(
+            "SELECT saldo FROM colecao_wishards_saldo WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        saldo = saldo_linha["saldo"] if saldo_linha else 0
+        linhas_wishards = []
+        for vitoria in vitorias:
+            saldo += vitoria["recompensa"]
+            andar = vitoria["andar"]
+            linhas_wishards.append((
+                guild_id, user_id, vitoria["recompensa"], "torre_andar", f"Andar {andar}", str(andar), saldo, agora,
+            ))
+        conn.execute(
+            "INSERT INTO colecao_wishards_saldo (guild_id, user_id, saldo) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET saldo = excluded.saldo",
+            (guild_id, user_id, saldo),
+        )
+        conn.executemany(
+            "INSERT INTO colecao_wishards_ledger "
+            "(guild_id, user_id, quantidade, origem, motivo, referencia, saldo_resultante, criado_em) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            linhas_wishards,
+        )
+
+        progresso = conn.execute(
+            "SELECT nivel, xp FROM colecao_progressao WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ).fetchone()
+        nivel, xp = (progresso["nivel"], progresso["xp"]) if progresso else (1, 0)
+        linhas_xp = []
+        for vitoria in vitorias:
+            xp += vitoria["xp"]
+            while xp >= xp_necessario_nivel(nivel, guild_id, user_id):
+                xp -= xp_necessario_nivel(nivel, guild_id, user_id)
+                nivel += 1
+            andar = vitoria["andar"]
+            linhas_xp.append((
+                guild_id, user_id, vitoria["xp"], "torre_andar", f"Andar {andar}", str(andar), nivel, agora,
+            ))
+        conn.execute(
+            "INSERT INTO colecao_progressao (guild_id, user_id, nivel, xp) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel = excluded.nivel, xp = excluded.xp",
+            (guild_id, user_id, nivel, xp),
+        )
+        conn.executemany(
+            "INSERT INTO colecao_xp_progressao_ledger "
+            "(guild_id, user_id, quantidade, origem, motivo, referencia, nivel_resultante, criado_em) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            linhas_xp,
+        )
+
+        vitorias_por_personagem = {}
+        for vitoria in vitorias:
+            for personagem_id in vitoria["personagem_ids"]:
+                vitorias_por_personagem[personagem_id] = vitorias_por_personagem.get(personagem_id, 0) + 1
+        conn.executemany(
+            "INSERT INTO colecao_torre_estatisticas (guild_id, user_id, personagem_id, andares_vencidos) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id, personagem_id) DO UPDATE SET "
+            "andares_vencidos = andares_vencidos + excluded.andares_vencidos",
+            [(guild_id, user_id, personagem_id, quantidade) for personagem_id, quantidade in vitorias_por_personagem.items()],
+        )
+
+        conn.execute("DELETE FROM colecao_equipe WHERE guild_id = ? AND user_id = ? AND tipo = 'party'", (guild_id, user_id))
+        conn.executemany(
+            "INSERT INTO colecao_equipe (guild_id, user_id, tipo, posicao, personagem_id) VALUES (?, ?, 'party', ?, ?)",
+            [(guild_id, user_id, posicao, personagem_id) for posicao, personagem_id in enumerate(party_final_ids, start=1)],
+        )
+        conn.execute(
+            "INSERT INTO colecao_torre_progresso (guild_id, user_id, andar_atual) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET andar_atual = excluded.andar_atual",
+            (guild_id, user_id, andar_final),
+        )
+
+
 _popularidade_maxima_cache = None
 
 
@@ -3527,17 +3805,35 @@ NIVEIS_PROGRESSAO_POR_PONTO_PERCENTUAL = 5
 # 18%") custando 1.000 (100×10).
 BONUS_FIXO_POR_NIVEL_TREINAMENTO = 25
 BONUS_PERCENTUAL_POR_NIVEL_POTENCIAL = 2
-# 🔥 Curva virou QUADRÁTICA (2026-09-03, pedido do usuário: "aumenta mais
-# o custo. Eu tenho 28m, e comprar 25 melhorias ja no lv350 n sai nem por
-# 1M") - a curva LINEAR antiga (`custo(n) = C * n`) deixava o Nv.350
-# custando só 35.000/17.500 (Potencial/Treinamento) - barato demais pra
-# quem já tem dezenas de milhões. `custo(n) = C * n²` cresce muito mais
-# rápido em nível alto SEM mexer no preço de quem ainda está no início -
-# as 2 constantes abaixo foram escolhidas pra CRUZAR com o preço linear
-# antigo exatamente no Nível 50 (`C_novo = C_antigo / 50`): quem está
-# abaixo do Nv.50 paga um pouco MENOS que antes, quem está acima paga
-# cada vez mais. Ex.: Potencial Nv.350 sozinho vai de 35.000 pra 245.000
-# (7x); um pacote de 25 níveis perto do 350 vai de ~845.000 pra ~5,7M.
+# 🔥 Curva virou QUÁRTICA (2026-09-06, achado do usuário auditando a
+# própria conta: "estou ja no upgrade 500, e preço ainda esta em 250k,
+# sendo q eu produzo ja milhoes por hora" - ~1,67B WiShards/hora medidos
+# na Cidade, contra um custo QUADRÁTICO que só cobra 250k/500k no Nv.500 -
+# menos de 1 SEGUNDO de renda por nível. A curva quadrática (2026-09-03)
+# já tinha sido uma correção da linear original, mas a renda escalou
+# ordens de magnitude mais rápido que qualquer correção pontual consegue
+# acompanhar - pedido explícito do usuário: "não é correto colocar custo
+# baseado em produção, seria injusto [pra quem produz menos]. Acho que
+# pode ser um valor fixo. Mas quero que você consiga ir ajustando a
+# fórmula até chegarmos num valor ideal, à medida que for analisando os
+# logs" (ver `colecao_producao_historico`, novo nesta mesma leva - ainda
+# sem histórico suficiente pra calibrar por TENDÊNCIA real, só pelo
+# snapshot de hoje).
+#
+# `custo(n) = FATOR_CUSTO_PROGRESSAO_CONTA × C × n⁴` - calibrado pra
+# Treinamento Global custar ~300M no Nv.500 (real do usuário agora, ~11min
+# da renda medida) - Potencial da Coleção (C=2) sai o dobro, mesmo
+# critério de sempre ("cresce mais rápido de propósito"). Efeito colateral
+# ACEITO conscientemente (grau 4 é bem mais agressivo que quadrático) -
+# níveis baixos/médios (~50-300) também ficam mais caros que antes, não só
+# o topo - não dá pra escalar TANTO no fim sem também subir no meio com
+# uma curva de potência só; documentado aqui pra não parecer regressão
+# não-intencional numa auditoria futura. Valor de partida, não final - a
+# CADA revisão futura (nova conversa de balance, olhando `colecao_
+# producao_historico` acumulado), reavaliar `FATOR_CUSTO_PROGRESSAO_CONTA`
+# contra a renda/hora real observada NAQUELE momento, do mesmo jeito que
+# esta leva usou a renda de hoje.
+FATOR_CUSTO_PROGRESSAO_CONTA = 0.0048
 CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL = 1
 CUSTO_POTENCIAL_COLECAO_POR_NIVEL = 2
 # 🔥 Marcos de coleção única (Seção 11 - "não deve ser a principal fonte
@@ -3546,10 +3842,15 @@ CUSTO_POTENCIAL_COLECAO_POR_NIVEL = 2
 MARCOS_COLECAO = (100, 200, 500, 1000, 2000, 5000, 10000)
 
 
-def xp_necessario_nivel(nivel):
-    """XP pra sair de `nivel` pro próximo - geométrico, mesmo estilo de
-    `torre.power_alvo_andar` (número novo, a análise autoriza "valores
-    exatos podem ser balanceados posteriormente")."""
+def xp_necessario_nivel(nivel, guild_id=None, user_id=None):
+    """XP pra sair de nível: seis horas da produção de Cultura atual.
+
+    Sem conta informada mantém a curva antiga apenas para compatibilidade
+    com utilitários legados que não têm uma Cidade para consultar.
+    """
+    if guild_id is not None and user_id is not None:
+        from pandora import cidade
+        return max(1, round(cidade.taxa_xp_progressao_por_hora(guild_id, user_id) * 6))
     bruto = XP_BASE_NIVEL_PROGRESSAO * (XP_TAXA_CRESCIMENTO_PROGRESSAO ** (nivel - 1))
     return round(bruto / 10) * 10
 
@@ -3569,36 +3870,68 @@ def progressao_conta(guild_id, user_id):
     return dict(linha)
 
 
-def creditar_xp_progressao(guild_id, user_id, quantidade):
+def creditar_xp_progressao(guild_id, user_id, quantidade, origem, motivo=None, referencia=None):
     """Credita XP de Progressão (Seção 3/4) - sobe de Nível em CASCATA se
     a quantidade creditada de uma vez ultrapassar mais de 1 limiar (ex.:
     um marco de coleção grande de uma vez). NUNCA é moeda - só preenche a
-    barra. Devolve (nivel_novo, xp_novo, subiu_de_nivel: bool)."""
+    barra. Devolve (nivel_novo, xp_novo, subiu_de_nivel: bool).
+
+    🔥 `origem` (2026-09-07, pedido do usuário: "botao de progressao,
+    mostrando as fontes de xp acumaladas ate entao") - agora OBRIGATÓRIO
+    (mesmo padrão de `creditar_wishards`/`creditar_soulstone`, nunca
+    opcional) - grava um ledger próprio (`colecao_xp_progressao_ledger`)
+    além do nível/XP em si, pra `xp_por_origem` conseguir montar o
+    "📈 Progressão" da Cidade."""
     estado = progressao_conta(guild_id, user_id)
     if quantidade <= 0:
         return estado["nivel"], estado["xp"], False
     nivel, xp = estado["nivel"], estado["xp"] + quantidade
     subiu = False
-    while xp >= xp_necessario_nivel(nivel):
-        xp -= xp_necessario_nivel(nivel)
+    while xp >= xp_necessario_nivel(nivel, guild_id, user_id):
+        xp -= xp_necessario_nivel(nivel, guild_id, user_id)
         nivel += 1
         subiu = True
+    agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_progressao (guild_id, user_id, nivel, xp) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET nivel = excluded.nivel, xp = excluded.xp",
             (str(guild_id), str(user_id), nivel, xp),
         )
+        conn.execute(
+            "INSERT INTO colecao_xp_progressao_ledger "
+            "(guild_id, user_id, quantidade, origem, motivo, referencia, nivel_resultante, criado_em) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(guild_id), str(user_id), quantidade, origem, motivo, referencia, nivel, agora),
+        )
     return nivel, xp, subiu
+
+
+def xp_por_origem(guild_id, user_id):
+    """{origem: soma_de_xp}, do ledger (`colecao_xp_progressao_ledger`) -
+    só cobre XP creditado DEPOIS que o ledger passou a existir (2026-09-07),
+    ver comentário da tabela. Usado pelo "📈 Progressão" da Cidade."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT origem, SUM(quantidade) AS soma FROM colecao_xp_progressao_ledger "
+            "WHERE guild_id = ? AND user_id = ? GROUP BY origem ORDER BY soma DESC",
+            (str(guild_id), str(user_id)),
+        ).fetchall()
+    return {linha["origem"]: linha["soma"] for linha in linhas}
 
 
 def bonus_cp_global(guild_id, user_id):
     """(bonus_fixo, bonus_percentual) da Progressão Global - `pandora.
-    torre.power_personagem` é o ÚNICO ponto que aplica isso (`(CP +
-    bonus_fixo) × (1 + bonus_percentual)`, Seção 8), então todo Power
-    calculado no pacote já sai com o bônus embutido sem precisar mudar
-    mais nenhum outro lugar. `bonus_percentual` já vem pronto pra
-    multiplicar (0,04 = +4%, não "4")."""
+    torre.power_personagem` é o ÚNICO ponto que aplica isso (Seção 8),
+    então todo Power calculado no pacote já sai com o bônus embutido sem
+    precisar mudar mais nenhum outro lugar. `bonus_percentual` já vem
+    pronto pra multiplicar (0,04 = +4%, não "4").
+
+    🔥 `bonus_percentual` só multiplica a BASE, `bonus_fixo` entra como
+    soma por cima (2026-09-06, ver comentário completo em `torre.
+    power_personagem` - o Potencial da Coleção sem teto tinha virado um
+    multiplicador de ×11+ aplicado em cima de TUDO, deixando a base
+    natural da personagem em <1% do CP final numa conta real)."""
     estado = progressao_conta(guild_id, user_id)
     bonus_fixo = (
         BONUS_FIXO_POR_NIVEL_PROGRESSAO * estado["nivel"]
@@ -3611,6 +3944,73 @@ def bonus_cp_global(guild_id, user_id):
     return bonus_fixo, bonus_percentual
 
 
+# 🔥 Nível de Progressão influenciando MAIS coisas (2026-09-06, pedido do
+# usuário: "acho interessante se o Nivel de Progressao da conta tivesse
+# mais influencia em tudo, desde custo ate drop e rolls... Nao é p ser
+# algo tao quebrado, mas uma leve mudança por level q chega a fazer
+# diferença" - escolheu a opção "Tudo" entre custo/drop/odds de raridade
+# do roll quando perguntado). Até aqui o Nível só afetava CP (`bonus_cp_
+# global` acima) - os 3 bônus abaixo são NOVOS, cada um com teto próprio
+# (nunca sem limite - "não quebrado") e granularidade mais larga que o
+# bônus de CP (menos generosos de propósito, são 3 sistemas a mais
+# empilhando no mesmo Nível, não só mais um).
+#
+# 1) Desconto de custo (WiShards/Soulstone) - aplicado por enquanto só em
+# Treinamento Global/Potencial da Coleção (`custo_total_treinamento_ate`/
+# `custo_total_potencial_ate`) - os 2 upgrades que motivaram esta conversa
+# inteira de balance. Loja "Comprar"/Upgrade de Rolls/Claims/Investir em
+# Massa (Upar Nível/Afinidade) ainda NÃO usam este desconto - ver
+# `docs/TODO.md` ("expandir desconto de Nível de Progressão pros outros
+# custos") pra não esquecer a expansão.
+NIVEIS_POR_PONTO_DESCONTO_CUSTO = 20
+DESCONTO_POR_PONTO_NIVEL = 0.005
+DESCONTO_MAXIMO_NIVEL = 0.25
+
+
+def desconto_por_nivel_progressao(nivel):
+    """0.05 = 5% de desconto - recebe o NÍVEL já lido (não guild_id/
+    user_id) de propósito, pra quem já tem `progressao_conta` em mãos
+    (a maioria dos chamadores) não pagar outra consulta ao banco só pra
+    ler de novo o mesmo valor."""
+    pontos = nivel // NIVEIS_POR_PONTO_DESCONTO_CUSTO
+    return min(DESCONTO_MAXIMO_NIVEL, pontos * DESCONTO_POR_PONTO_NIVEL)
+
+
+# 2) Bônus na chance de drop raro (World Boss) - pequeno, aditivo, teto
+# baixo (a Seção 5 já pede "significativamente mais raros que as
+# recompensas básicas" pro drop raro - não é o lugar de dar um empurrão
+# grande).
+NIVEIS_POR_PONTO_BONUS_DROP = 25
+BONUS_DROP_POR_PONTO_NIVEL = 0.002
+BONUS_DROP_MAXIMO_NIVEL = 0.05
+
+
+def bonus_drop_raro_por_nivel(nivel):
+    """+0.02 = +2 pontos percentuais na chance de drop raro (`itens.
+    CHANCE_DROP_RARO`, base 15%) - mesmo motivo acima, recebe `nivel` já
+    lido."""
+    pontos = nivel // NIVEIS_POR_PONTO_BONUS_DROP
+    return min(BONUS_DROP_MAXIMO_NIVEL, pontos * BONUS_DROP_POR_PONTO_NIVEL)
+
+
+# 3) Odds de raridade do roll - o sistema MAIS sensível dos 3 (rege toda a
+# economia de personagens), por isso o mais conservador: desloca uma
+# fração pequena do peso do tier 1 (mais comum) pra 4⭐/5⭐, proporcional
+# ao peso ATUAL deles (preserva a proporção 4:1 entre eles, só aumenta os
+# 2 juntos) - a SOMA dos pesos nunca muda, então `random.choices` nem
+# precisa normalizar diferente.
+NIVEIS_POR_PONTO_RARIDADE = 40
+TETO_PONTOS_RARIDADE_NIVEL = 10
+
+
+def pontos_bonus_raridade_por_nivel(nivel):
+    """Quantos pontos de peso mover do tier 1 pro 4⭐/5⭐ (ver `gacha.
+    _PESOS_RARIDADE`, soma 100) - no teto (Nível >= 400), desloca 10 dos
+    50 pontos do tier 1 (20% dele) - ~3x mais chance de 5⭐, ~3x mais
+    chance de 4⭐, tier 1/2/3 continuam na MESMA proporção entre si."""
+    return min(TETO_PONTOS_RARIDADE_NIVEL, nivel // NIVEIS_POR_PONTO_RARIDADE)
+
+
 # 🔥 Bônus por CLASSE (2026-08-30, pedido do usuário: "a cada 50
 # personagens da classe ganho +500 bonus p todos daquela classe na
 # torre" - depois revisado pro mesmo RATIO com granularidade menor: "a cd
@@ -3618,8 +4018,83 @@ def bonus_cp_global(guild_id, user_id):
 # incentiva colecionar VÁRIAS da MESMA classe (taxonomia ABERTA, não a
 # categoria/função fechada) - toda personagem daquela classe ganha o
 # bônus, não só as que estão na Party/Torre.
-MARCO_QUANTIDADE_CLASSE = 5
-BONUS_POR_MARCO_CLASSE = 50
+#
+# 🔥 Marco por CATEGORIA (2026-09-06, achado do usuário: Tank era ~11x
+# mais raro que Support) e depois REVERTIDO no mesmo dia (Guerreiro/
+# Dragão/Lutador viraram Tank, deixou de ser raro) - histórico completo
+# no CHANGELOG, removido daqui porque a raiz quadrada abaixo tornou o
+# conceito de "marco por categoria" obsoleto (a curva já se auto-ajusta
+# pra qualquer tamanho de classe, sem precisar de exceção manual).
+#
+# 🔥 Linear -> RAIZ QUADRADA -> FAIXAS CUMULATIVAS (2026-09-06, achado do
+# usuário: "Kokoro, classe Apoiador (~960 possuídas)" empatava com uma
+# waifu MAXADA de "Mago" (~400 possuídas) só pela diferença de população
+# entre as 2 classes - `(quantidade // 5) × 50` sem teto dava +9.600 pra
+# Apoiador contra +4.000 pra Mago, diferença MAIOR que o próprio teto de
+# investimento numa personagem (Fortalecimento vai só até 1000 de Power
+# Base). A raiz quadrada resolveu o exploit mas o usuário achou o
+# resultado pouco "desenhado" - pediu algo mais explícito e ajustável:
+# "Quero alterar o bônus dos marcos de classe para ter retorno
+# decrescente conforme a classe cresce... A progressão deve ser
+# cumulativa por faixa" - cada marco de 5 vale um CP diferente dependendo
+# de EM QUE FAIXA de quantidade ele foi conquistado (1-100 = +5/marco,
+# 101-250 = +4, 251-500 = +3, 501-1000 = +2, 1000+ = +1) - "ao entrar em
+# uma nova faixa, os marcos anteriores mantêm o valor que tinham quando
+# foram conquistados" (nunca retroage, só os marcos NOVOS entram mais
+# baratos). Exemplo do próprio usuário validado: 300 personagens = 20
+# marcos×5 (até 100) + 30 marcos×4 (101-250) + 10 marcos×3 (251-300) =
+# 100+120+30 = 250 CP.
+MARCO_QUANTIDADE_CLASSE_PADRAO = 5
+# (limite superior da faixa - quantidade de personagens, CP por marco DENTRO dela)
+FAIXAS_BONUS_CLASSE = (
+    (100, 5),
+    (250, 4),
+    (500, 3),
+    (1000, 2),
+    (None, 1),  # sem teto - último item, `None` = "resto, sem limite"
+)
+
+
+def _marco_atual_classe(quantidade):
+    """Maior múltiplo de `MARCO_QUANTIDADE_CLASSE_PADRAO` (5) que
+    `quantidade` já cobre - 0 se ainda não bateu o 1º marco."""
+    return (quantidade // MARCO_QUANTIDADE_CLASSE_PADRAO) * MARCO_QUANTIDADE_CLASSE_PADRAO
+
+
+def pontos_por_marco(quantidade, passo=MARCO_QUANTIDADE_CLASSE_PADRAO):
+    """Pontos acumulados pelos marcos de `passo` em `passo` já batidos por
+    `quantidade`, com retorno decrescente por FAIXA (`FAIXAS_BONUS_CLASSE`
+    - cada marco vale os pontos da faixa em que ele caiu, nunca
+    recalculado pra trás quando a quantidade total avança de faixa).
+    Função GENÉRICA (2026-09-06, "vamos começar a usar marcos na cidade
+    tbm p dar esses buffs") - originalmente só pro Bônus por Classe
+    (`quantidade` = personagens da mesma classe possuídas), reaproveitada
+    também pelos bônus da Cidade (`pandora.cidade` - `quantidade` =
+    trabalhadores numa área, ou personagens da coleção inteira pro Bônus
+    da Coleção) - cada contexto multiplica os "pontos" devolvidos aqui
+    pelo seu PRÓPRIO valor-por-ponto (CP fixo, % percentual, etc.), sem
+    duplicar a lógica de faixas."""
+    marco_atual = (quantidade // passo) * passo
+    if marco_atual <= 0:
+        return 0
+    total = 0
+    piso_faixa = 0
+    for teto_faixa, pontos_por_marco_faixa in FAIXAS_BONUS_CLASSE:
+        limite = marco_atual if teto_faixa is None else min(marco_atual, teto_faixa)
+        if limite <= piso_faixa:
+            break
+        total += ((limite - piso_faixa) // passo) * pontos_por_marco_faixa
+        if teto_faixa is None or marco_atual <= teto_faixa:
+            break
+        piso_faixa = teto_faixa
+    return total
+
+
+def _bonus_por_quantidade_classe(quantidade):
+    """CP fixo que uma classe com `quantidade` personagens possuídas dá
+    (Bônus por Classe) - 1 CP por ponto (`pontos_por_marco`), ver
+    comentário lá pro raciocínio completo e o exemplo validado."""
+    return pontos_por_marco(quantidade)
 
 
 def nivel_em_lote(guild_id, user_id):
@@ -3676,7 +4151,7 @@ def info_classes_em_lote(guild_id, user_id):
         ).fetchall()
     return {
         linha["classe"]: (
-            (linha["quantidade"] // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE,
+            _bonus_por_quantidade_classe(linha["quantidade"]),
             linha["categoria_combate"],
             linha["funcao_cidade"],
         )
@@ -3703,7 +4178,7 @@ def bonus_cp_classe(guild_id, user_id, classe):
     if not classe:
         return 0
     quantidade = quantidade_possuida_da_classe(guild_id, user_id, classe)
-    return (quantidade // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE
+    return _bonus_por_quantidade_classe(quantidade)
 
 
 def bonus_classes_por_categoria(guild_id, user_id):
@@ -3711,15 +4186,25 @@ def bonus_classes_por_categoria(guild_id, user_id):
     (2026-09-02, pedido do usuário: "uma nova tela q mostrasse q DPS ta
     ganhando +X Tank +Y... e n sei se separou por classe tbm") - devolve
     {categoria: {"total_bonus": int, "total_personagens": int, "classes":
-    [{"classe", "quantidade", "bonus", "proximo_marco"}, ...]}}, só com
-    classes que o jogador possui NESSE servidor (classe sem `categoria_
-    combate` cadastrada em `colecao_classes` cai em "Sem categoria").
-    `total_bonus` é a SOMA do bônus de cada classe da categoria (não
-    multiplicado pela quantidade de cada uma) - decisão explícita do
-    usuário depois de eu explicar que não existe um "+X do DPS" físico de
-    verdade (cada personagem só ganha o bônus da PRÓPRIA classe, nunca o
-    das outras classes da mesma categoria) - o número é só a soma dos
-    bônus vigentes agrupados, não um valor que se aplica a cada unidade."""
+    [{"classe", "quantidade", "bonus", "ganho_proximo_marco"}, ...]}}, só
+    com classes que o jogador possui NESSE servidor (classe sem
+    `categoria_combate` cadastrada em `colecao_classes` cai em "Sem
+    categoria"). `total_bonus` é a SOMA do bônus de cada classe da
+    categoria (não multiplicado pela quantidade de cada uma) - decisão
+    explícita do usuário depois de eu explicar que não existe um "+X do
+    DPS" físico de verdade (cada personagem só ganha o bônus da PRÓPRIA
+    classe, nunca o das outras classes da mesma categoria) - o número é
+    só a soma dos bônus vigentes agrupados, não um valor que se aplica a
+    cada unidade.
+
+    🔥 `ganho_proximo_marco` substitui `proximo_marco` (2026-09-06,
+    achado do usuário: "esse p proximo marco ficou sem necessidade,
+    podia informar qnt vai aumentar no proximo marco" - mostrar a
+    QUANTIDADE do próximo marco (ex.: "453/455") não dizia nada sobre o
+    IMPACTO real, ainda mais agora que cada marco vale um CP diferente
+    conforme a faixa (`FAIXAS_BONUS_CLASSE`) - o número que interessa é
+    quanto CP a MAIS o próximo marco concede, não em que quantidade ele
+    acontece."""
     with conexao() as conn:
         linhas = conn.execute(
             "SELECT p.classe AS classe, cc.categoria_combate AS categoria_combate, COUNT(*) AS quantidade "
@@ -3734,13 +4219,14 @@ def bonus_classes_por_categoria(guild_id, user_id):
     for linha in linhas:
         categoria = linha["categoria_combate"] or "Sem categoria"
         quantidade = linha["quantidade"]
-        bonus = (quantidade // MARCO_QUANTIDADE_CLASSE) * BONUS_POR_MARCO_CLASSE
-        proximo_marco = (quantidade // MARCO_QUANTIDADE_CLASSE + 1) * MARCO_QUANTIDADE_CLASSE
+        bonus = _bonus_por_quantidade_classe(quantidade)
+        proximo_marco = _marco_atual_classe(quantidade) + MARCO_QUANTIDADE_CLASSE_PADRAO
+        ganho_proximo_marco = _bonus_por_quantidade_classe(proximo_marco) - bonus
         entrada = categorias.setdefault(categoria, {"total_bonus": 0, "total_personagens": 0, "classes": []})
         entrada["total_bonus"] += bonus
         entrada["total_personagens"] += quantidade
         entrada["classes"].append(
-            {"classe": linha["classe"], "quantidade": quantidade, "bonus": bonus, "proximo_marco": proximo_marco}
+            {"classe": linha["classe"], "quantidade": quantidade, "bonus": bonus, "ganho_proximo_marco": ganho_proximo_marco}
         )
     for entrada in categorias.values():
         entrada["classes"].sort(key=lambda c: c["bonus"], reverse=True)
@@ -3748,18 +4234,20 @@ def bonus_classes_por_categoria(guild_id, user_id):
 
 
 def custo_treinamento_global(nivel_alvo):
-    return CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL * nivel_alvo * nivel_alvo
+    return round(CUSTO_TREINAMENTO_GLOBAL_POR_NIVEL * FATOR_CUSTO_PROGRESSAO_CONTA * nivel_alvo ** 4)
 
 
-def custo_total_treinamento_ate(nivel_atual, nivel_alvo):
+def custo_total_treinamento_ate(nivel_atual, nivel_alvo, desconto=0.0):
     """Soma o custo de CADA nível de `nivel_atual` até `nivel_alvo`
     (2026-08-30, pedido do usuário: "na loja, qnd vou fazer treinamento
     global... tbm tem de permitr comprar varios leveis por vez" - mesmo
     padrão de `custo_total_ate_nivel`) - 0 se `nivel_alvo` não for maior
-    que o atual."""
+    que o atual. `desconto` (2026-09-06, `desconto_por_nivel_progressao`)
+    - 0.0 = sem desconto, mesmo comportamento de sempre."""
     if nivel_alvo <= nivel_atual:
         return 0
-    return sum(custo_treinamento_global(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
+    bruto = sum(custo_treinamento_global(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
+    return round(bruto * (1 - desconto))
 
 
 def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
@@ -3767,10 +4255,12 @@ def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
     pula DIRETO pro `nivel_alvo` (2026-08-30, substitui o antigo "+1 por
     clique" - dropdown escolhe o alvo, custo é a soma de todos os
     degraus, mesmo padrão de `subir_nivel_ate`)."""
-    nivel_atual = progressao_conta(guild_id, user_id)["nivel_treinamento_global"]
+    estado = progressao_conta(guild_id, user_id)
+    nivel_atual = estado["nivel_treinamento_global"]
     if nivel_alvo <= nivel_atual:
-        return False, f"Treinamento Global já está no Nível {nivel_atual} ou acima."
-    custo = custo_total_treinamento_ate(nivel_atual, nivel_alvo)
+        return False, f"Treinamento da Coleção já está no Nível {nivel_atual} ou acima."
+    desconto = desconto_por_nivel_progressao(estado["nivel"])
+    custo = custo_total_treinamento_ate(nivel_atual, nivel_alvo, desconto)
     if saldo_wishards(guild_id, user_id) < custo:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -custo, "treinamento_global", f"nível {nivel_atual}->{nivel_alvo}")
@@ -3781,20 +4271,21 @@ def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
             (str(guild_id), str(user_id), nivel_alvo),
         )
     bonus_total = nivel_alvo * BONUS_FIXO_POR_NIVEL_TREINAMENTO
-    return True, f"Treinamento Global Nv.{nivel_alvo}! +{fmt_numero(bonus_total)} CP fixo por personagem, pra sempre (custou {fmt_numero(custo)} WiShards)."
+    return True, f"Treinamento da Coleção Nv.{nivel_alvo}! +{fmt_numero(bonus_total)} CP fixo por personagem, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 def custo_potencial_colecao(nivel_alvo):
-    return CUSTO_POTENCIAL_COLECAO_POR_NIVEL * nivel_alvo * nivel_alvo
+    return round(CUSTO_POTENCIAL_COLECAO_POR_NIVEL * FATOR_CUSTO_PROGRESSAO_CONTA * nivel_alvo ** 4)
 
 
-def custo_total_potencial_ate(nivel_atual, nivel_alvo):
+def custo_total_potencial_ate(nivel_atual, nivel_alvo, desconto=0.0):
     """Soma o custo de CADA nível de `nivel_atual` até `nivel_alvo` (mesmo
     padrão de `custo_total_treinamento_ate`) - 0 se `nivel_alvo` não for
-    maior que o atual."""
+    maior que o atual. `desconto` - ver `custo_total_treinamento_ate`."""
     if nivel_alvo <= nivel_atual:
         return 0
-    return sum(custo_potencial_colecao(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
+    bruto = sum(custo_potencial_colecao(n) for n in range(nivel_atual + 1, nivel_alvo + 1))
+    return round(bruto * (1 - desconto))
 
 
 def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
@@ -3802,10 +4293,12 @@ def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
     custo cresce mais rápido que o Treinamento Global de propósito ("a
     eficiência cresce junto com o CP total"). Pula DIRETO pro `nivel_alvo`
     (2026-08-30, mesmo padrão de `comprar_treinamento_global_ate`)."""
-    nivel_atual = progressao_conta(guild_id, user_id)["nivel_potencial_colecao"]
+    estado = progressao_conta(guild_id, user_id)
+    nivel_atual = estado["nivel_potencial_colecao"]
     if nivel_alvo <= nivel_atual:
-        return False, f"Potencial da Coleção já está no Nível {nivel_atual} ou acima."
-    custo = custo_total_potencial_ate(nivel_atual, nivel_alvo)
+        return False, f"Maestria da Coleção já está no Nível {nivel_atual} ou acima."
+    desconto = desconto_por_nivel_progressao(estado["nivel"])
+    custo = custo_total_potencial_ate(nivel_atual, nivel_alvo, desconto)
     if saldo_wishards(guild_id, user_id) < custo:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
     creditar_wishards(guild_id, user_id, -custo, "potencial_colecao", f"nível {nivel_atual}->{nivel_alvo}")
@@ -3816,7 +4309,7 @@ def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
             (str(guild_id), str(user_id), nivel_alvo),
         )
     bonus_total = nivel_alvo * BONUS_PERCENTUAL_POR_NIVEL_POTENCIAL
-    return True, f"Potencial da Coleção Nv.{nivel_alvo}! +{bonus_total}% CP global, pra sempre (custou {fmt_numero(custo)} WiShards)."
+    return True, f"Maestria da Coleção Nv.{nivel_alvo}! +{bonus_total}% CP global, pra sempre (custou {fmt_numero(custo)} WiShards)."
 
 
 def maior_marco_colecao_atingido(guild_id, user_id):
@@ -3849,7 +4342,7 @@ def checar_marcos_colecao(guild_id, user_id):
     if not novos:
         return []
     for marco in novos:
-        creditar_xp_progressao(guild_id, user_id, marco * 10)
+        creditar_xp_progressao(guild_id, user_id, marco * 10, "marco_colecao", f"{marco} personagens únicas", str(marco))
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_progressao_marcos (guild_id, user_id, maior_marco) VALUES (?, ?, ?) "
@@ -3874,7 +4367,7 @@ def cidade_ultima_producao(guild_id, user_id):
 
 
 def definir_cidade_ultima_producao(
-    guild_id, user_id, momento, cp_bonus_militar_fixo=0.0, cp_bonus_arcano_percentual=0.0, cp_bonus_colecao_fixo=0.0,
+    guild_id, user_id, momento, cp_bonus_militar_fixo=0.0, cp_bonus_arcano_percentual=0.0, bonus_colecao_loot_percentual=0.0,
 ):
     """Grava o relógio da Cidade JUNTO com o snapshot de bônus de CP pra
     Party (2026-08-30, Cidade v2 - efeitos diferenciados por área) - os 2
@@ -3884,35 +4377,103 @@ def definir_cidade_ultima_producao(
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_cidade_estado ("
-            "guild_id, user_id, ultima_producao_em, cp_bonus_militar_fixo, cp_bonus_arcano_percentual, cp_bonus_colecao_fixo"
+            "guild_id, user_id, ultima_producao_em, cp_bonus_militar_fixo, cp_bonus_arcano_percentual, bonus_colecao_loot_percentual"
             ") VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
             "ultima_producao_em = excluded.ultima_producao_em, "
             "cp_bonus_militar_fixo = excluded.cp_bonus_militar_fixo, "
             "cp_bonus_arcano_percentual = excluded.cp_bonus_arcano_percentual, "
-            "cp_bonus_colecao_fixo = excluded.cp_bonus_colecao_fixo",
+            "bonus_colecao_loot_percentual = excluded.bonus_colecao_loot_percentual",
             (
                 str(guild_id), str(user_id), momento.isoformat(),
-                cp_bonus_militar_fixo, cp_bonus_arcano_percentual, cp_bonus_colecao_fixo,
+                cp_bonus_militar_fixo, cp_bonus_arcano_percentual, bonus_colecao_loot_percentual,
             ),
         )
 
 
+# 🔥 Intervalo mínimo entre 2 pontos de histórico (2026-09-06, pedido do
+# usuário: "seria ate bom manter uns logs disso") - registrar em TODA
+# visita ao painel "🏙️ Cidade" cresceria sem teto pra jogador que fica
+# abrindo o painel repetidamente, sem ganhar granularidade nenhuma (a taxa
+# por hora só muda quando a coleção/construção muda, não a cada clique).
+# 6h dá pontos suficientes pra ver TENDÊNCIA dia a dia sem virar ruído.
+INTERVALO_MINIMO_PRODUCAO_HISTORICO_HORAS = 6
+
+
+def registrar_producao_historico(guild_id, user_id, wishards_por_hora, soulstone_por_hora, xp_por_hora, cp_total, nivel_progressao):
+    """Snapshot de "quanto este jogador produz por hora agora" (2026-09-06,
+    pedido do usuário: "meu farm ta sempre aumentando, seria ate bom
+    manter uns logs disso p vc ter controle e dar sugestoes no futuro, e
+    tentar prever as proximas producoes" - qualquer decisão de preço/
+    balance baseada num ÚNICO número (o de hoje) fica velha assim que a
+    produção sobe de novo; isto aqui acumula pontos ao longo do tempo pra
+    uma futura conversa de balance comparar contra dado REAL de
+    crescimento, em vez de mais um chute). Chamado de `pandora.cidade.
+    coletar_producao_pendente` a cada visita à Cidade, mas só GRAVA um
+    ponto novo se o último já tiver pelo menos `INTERVALO_MINIMO_
+    PRODUCAO_HISTORICO_HORAS` de idade (ou não existir nenhum ainda) -
+    sem isso o histórico cresceria 1 linha por clique, sem ganhar
+    granularidade nenhuma (a taxa não muda entre 2 cliques segundos
+    depois um do outro)."""
+    agora = datetime.now(timezone.utc)
+    with conexao() as conn:
+        ultimo = conn.execute(
+            "SELECT registrado_em FROM colecao_producao_historico WHERE guild_id = ? AND user_id = ? "
+            "ORDER BY registrado_em DESC LIMIT 1",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+        if ultimo is not None:
+            idade_horas = (agora - datetime.fromisoformat(ultimo["registrado_em"])).total_seconds() / 3600
+            if idade_horas < INTERVALO_MINIMO_PRODUCAO_HISTORICO_HORAS:
+                return
+        conn.execute(
+            "INSERT INTO colecao_producao_historico "
+            "(guild_id, user_id, registrado_em, wishards_por_hora, soulstone_por_hora, xp_por_hora, cp_total, nivel_progressao) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(guild_id), str(user_id), agora.isoformat(), wishards_por_hora, soulstone_por_hora, xp_por_hora, cp_total, nivel_progressao),
+        )
+
+
+def producao_historico(guild_id, user_id, limite=60):
+    """Snapshots mais RECENTES primeiro (`registrado_em` desc) - usada pra
+    olhar tendência de crescimento (ex.: "quanto o farm deste jogador
+    cresceu nos últimos N dias") numa conversa de balance futura, em vez
+    de decidir preço/custo olhando só o momento atual."""
+    with conexao() as conn:
+        linhas = conn.execute(
+            "SELECT registrado_em, wishards_por_hora, soulstone_por_hora, xp_por_hora, cp_total, nivel_progressao "
+            "FROM colecao_producao_historico WHERE guild_id = ? AND user_id = ? "
+            "ORDER BY registrado_em DESC LIMIT ?",
+            (str(guild_id), str(user_id), limite),
+        ).fetchall()
+    return [dict(r) for r in linhas]
+
+
 def cidade_bonus_party(guild_id, user_id):
-    """(bonus_militar_fixo, bonus_arcano_percentual, bonus_colecao_fixo) -
+    """(bonus_militar_fixo, bonus_arcano_percentual) -
     snapshot já calculado (Administração já multiplicada dentro dos 2
     primeiros) - `pandora.torre.calcular_power_party` só LÊ isso, nunca
     recalcula a partir da coleção inteira (ver `pandora.cidade`).
     (0.0, 0.0, 0.0) se a Cidade nunca foi visitada ainda."""
     with conexao() as conn:
         linha = conn.execute(
-            "SELECT cp_bonus_militar_fixo, cp_bonus_arcano_percentual, cp_bonus_colecao_fixo "
+            "SELECT cp_bonus_militar_fixo, cp_bonus_arcano_percentual "
             "FROM colecao_cidade_estado WHERE guild_id = ? AND user_id = ?",
             (str(guild_id), str(user_id)),
         ).fetchone()
     if linha is None:
-        return 0.0, 0.0, 0.0
-    return linha["cp_bonus_militar_fixo"], linha["cp_bonus_arcano_percentual"], linha["cp_bonus_colecao_fixo"]
+        return 0.0, 0.0
+    return linha["cp_bonus_militar_fixo"], linha["cp_bonus_arcano_percentual"]
+
+
+def bonus_loot_colecao(guild_id, user_id):
+    """Fração extra de loot no snapshot da Cidade; 0 se nunca visitada."""
+    with conexao() as conn:
+        linha = conn.execute(
+            "SELECT bonus_colecao_loot_percentual FROM colecao_cidade_estado WHERE guild_id = ? AND user_id = ?",
+            (str(guild_id), str(user_id)),
+        ).fetchone()
+    return linha["bonus_colecao_loot_percentual"] if linha else 0.0
 
 
 def funcao_cidade_da_classe(classe):
@@ -4458,9 +5019,18 @@ def chave_torre_ativa(guild_id, user_id):
 # DINÂMICO abaixo pode enxergar sem criar import cíclico (`itens.py` e
 # `cidade.py` já importam `db.py`, nunca o contrário). `itens.
 # AREAS_CONSTRUCAO`/`cidade.FUNCOES_CIDADE` viraram aliases pra esta.
-AREAS_CONSTRUCAO = ("Militar", "Saúde", "Cultura", "Administração", "Comércio", "Arcano")
+# Ordem visual única da Cidade: os cards, botões de detalhe e seletores de
+# construção reutilizam esta lista. Mantém Administração/Militar/Arcano na
+# primeira linha e Comércio/Saúde/Cultura na segunda.
+AREAS_CONSTRUCAO = ("Administração", "Militar", "Arcano", "Comércio", "Saúde", "Cultura")
 
-NIVEL_MAXIMO_CONSTRUCAO_BASE = 10  # primeiro degrau do teto dinâmico, ver `teto_atual_construcao`
+# 🔥 50 em vez de 10 (2026-09-07, pedido do usuário: "Esse limite de so
+# poder upar de 10 em 10... pode aumentar o limite p 50lvs" - depois
+# simplificado pra permanente: "Na verdade pode manter sempre 50 como
+# cap" + "P subir p 51, todas tem de ta 50. P subir p 101, todas tem de
+# ta em 100" - mesma mecânica de sempre (área mais atrasada trava as
+# outras), só o degrau que cresceu.
+NIVEL_MAXIMO_CONSTRUCAO_BASE = 50  # primeiro degrau do teto dinâmico, ver `teto_atual_construcao`
 
 
 def nivel_construcao(guild_id, user_id, area):
@@ -4486,14 +5056,16 @@ def teto_atual_construcao(guild_id, user_id):
     """Teto de nível vigente pra upgrade de QUALQUER área (2026-09-03,
     pedido do usuário: "os upgrades maximos vao ser a cd 10 lv, e o
     limite so é quebrado qnd todas as reas tao no maximo. Ai o limite
-    aumenta em +10, e vai indo") - começa em `NIVEL_MAXIMO_CONSTRUCAO_
-    BASE` (10); só sobe +10 quando TODAS as 6 áreas já bateram o teto
-    anterior - a área MAIS ATRASADA decide o teto vigente pra TODAS, não
-    cada uma o seu próprio (área nunca comprada conta como nível 0, o
-    pior caso possível). O teto é sempre RECALCULADO na hora (nunca
-    gravado) - no instante em que a última área atrasada alcança o teto
-    velho, a própria leitura seguinte já devolve o teto novo, sem
-    precisar de um passo separado de "destravar"."""
+    aumenta em +10, e vai indo" - degrau virou 50 em 2026-09-07, ver
+    comentário de `NIVEL_MAXIMO_CONSTRUCAO_BASE`) - começa em
+    `NIVEL_MAXIMO_CONSTRUCAO_BASE`; só sobe mais um degrau quando TODAS
+    as 6 áreas já bateram o teto anterior - a área MAIS ATRASADA decide o
+    teto vigente pra TODAS, não cada uma o seu próprio (área nunca
+    comprada conta como nível 0, o pior caso possível). O teto é sempre
+    RECALCULADO na hora (nunca gravado) - no instante em que a última
+    área atrasada alcança o teto velho, a própria leitura seguinte já
+    devolve o teto novo, sem precisar de um passo separado de
+    "destravar"."""
     niveis = niveis_construcoes(guild_id, user_id)
     nivel_minimo = min((niveis.get(area, 0) for area in AREAS_CONSTRUCAO), default=0)
     return NIVEL_MAXIMO_CONSTRUCAO_BASE * (nivel_minimo // NIVEL_MAXIMO_CONSTRUCAO_BASE + 1)

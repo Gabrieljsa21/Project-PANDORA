@@ -1,39 +1,149 @@
 # TODO - Project PANDORA
 
-### Validar ordem da Cidade + velocidade da Party ao filtrar por role ao vivo (2026-09-06)
+### Decidir o que fazer com `andar_atual_torre` inflado (2026-09-06)
 
-**Prioridade:** Média | **Complexidade:** Baixa
+**Prioridade:** Alta | **Complexidade:** Baixa (decisão) / Média (se migrar)
 
-Implementado (troca de ordem em `_embed_cidade`; `_abrir_adicionar`
-reaproveitando 1 `_contexto_lote` só pro filtro/ordenação/descrição, em
-vez de 3 buscas separadas, uma delas fazendo N consultas) mas só validado
-por leitura de código, sem clique real no Discord nem medição de tempo de
-verdade. Precisa confirmar ao vivo: abrir "🏙️ Cidade" e ver "Desde sua
-última visita" mostrando WiShards/Soulstone/XP de Progressão nessa ordem;
-na Party, "➕ Adicionar" -> escolher uma role (DPS/Tank/Support) numa
-conta com MUITAS personagens (idealmente centenas, pra sentir a diferença
-de verdade) e comparar a demora percebida com antes da correção - o
-resultado final (quem aparece, em qual ordem, com qual descrição) precisa
-ser IDÊNTICO ao de antes, só mais rápido.
+Com o Power da Party corrigido (bug de fórmula + 2 recalibrações da
+Cidade, ver CHANGELOG), o andar HONESTO alcançável pela conta testada
+hoje é ~104 - mas `andar_atual_torre` continua gravado em 398 (artefato
+do bug acumulado, nunca reduzido - Torre nunca pune). Pendente decisão
+do usuário: (1) deixar como está - a conta só não avança/vence
+tentativas novas até reconstruir Power de verdade, sem nenhuma migração;
+(2) resetar `andar_atual_torre` pra refletir o Power real de cada conta
+(script de migração, provavelmente afeta TODAS as contas que já
+progrediram na Torre, não só a testada - qualquer andar alcançado
+enquanto os bugs de CP estavam ativos está igualmente inflado). Opção
+(1) é mais simples e já é o comportamento atual, sem precisar de nada
+novo.
 
-### Validar dropdowns de personagem padronizados + 3 bugs corrigidos ao vivo (2026-09-06)
+### Validar teto de Construção em 50 + clamp de 25 opções ao vivo (2026-09-07)
 
 **Prioridade:** Alta | **Complexidade:** Baixa
 
-Implementado (classe + CP base em `_descricao_personagem_dropdown`/novo
-`_descricao_personagem_livre_dropdown`, Trocas corrigido pro formato
-padrão, defer() no botão Coleção do Perfil, botão de Slot de Série
-Favorita removido da Loja, card completo com imagem nas Waifus) mas só
-validado por leitura de código, sem clique real no Discord. Precisa
-confirmar ao vivo: abrir Party/Fusão/Trocas/"🔍 Personagem"/Batalha/
-Proteção/Prova de Soulmate e ver a classe + CP base aparecendo certos no
-dropdown (e sem estourar o limite de 100 caracteres de `SelectOption.
-description` em nome de classe muito longo); "Comprar Tudo"/Loja "Comprar"
-mostrando classe/CP base sem Nível/Afinidade; clicar "📚 Coleção" dentro do
-Perfil e confirmar que responde mesmo com coleção grande; conferir que a
-Loja não tem mais o botão "Slot de Série Favorita" e que comprar slot
-ainda funciona normal pela tela de Séries; abrir um slot de Waifu ocupado
-e ver a imagem/classe da personagem aparecendo no card.
+Implementado (ver `ARQUITETURA.md` - "Teto dinâmico de Construção: degrau
+10 -> 50"): `db.NIVEL_MAXIMO_CONSTRUCAO_BASE` virou 50 (era 10),
+permanente - "P subir p 51, todas tem de ta 50. P subir p 101, todas tem
+de ta em 100" (pedido do usuário, depois de descartar uma 1ª versão
+condicional que nunca chegou a subir). Testado só via script direto
+contra o banco real (teto calculado certo pros níveis reais da conta -
+30/30/30/30/40/30 -> teto 50). Clamp de 25 opções em `_ViewEscolherAlvo`
+testado isolado (área no Lv1/teto 50 -> exatamente 25 opções geradas, sem
+estourar o limite do Discord). Falta confirmar ao vivo: abrir "🏙️ Cidade",
+clicar "💰 Upar Construção" ou "🏗️ Usar Upgrade de Construção" numa área
+com margem grande até o teto (diferença > 25) e conferir que o dropdown
+abre normalmente (sem erro do Discord) mostrando só as primeiras 25
+opções; comprar aos poucos e confirmar que uma 2ª rodada do dropdown
+continua de onde parou; deixar TODAS as 6 áreas baterem o teto de 50 e
+conferir que o próximo teto vira 100 (não trava nem quebra a leitura).
+
+### Validar "Upar Construção" + Comércio recalibrado + botão "📈 Progressão" ao vivo (2026-09-07)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+🔥 **SUPERA o item anterior sobre preço LINEAR do item da Loja** (mesmo
+dia - o usuário pediu pra tirar o item da Loja de vez, ver `ARQUITETURA.md`
+- "Upar Construção substitui o item da Loja"). Estado final: "🏗️ Upgrade
+de Construção" SAIU da Loja (só drop/prêmio agora); novo botão "💰 Upar
+Construção" no painel da Cidade paga WiShards direto por área, preço
+FIXO por faixa de 10 níveis (`itens.FAIXAS_CUSTO_CONSTRUCAO`, igual pras
+6 áreas - Lv19→20=250K, Lv99→100=2M, testado exato contra os 8 exemplos
+do usuário); `cidade.BONUS_BASE_POR_AREA["Comércio"]` caiu de 250 pra 50.
+`db.creditar_xp_progressao` ganhou `origem` obrigatório + ledger novo
+(`colecao_xp_progressao_ledger`, 10 pontos do código etiquetados, incluindo
+World Boss que tinha ficado de fora na 1ª leva) + botão "📈 Progressão" no
+painel da Cidade (`db.xp_por_origem`). **Tudo só validado por script
+direto contra o banco real** (compra de "Upar Construção" testada e
+revertida manualmente, sem sujar a conta real) - nenhum clique real no
+Discord ainda. Falta confirmar ao vivo: abrir "🛒 Loja" e ver que "🏗️
+Upgrade de Construção" SUMIU da lista de compra; abrir "🏙️ Cidade",
+clicar "💰 Upar Construção", escolher uma área e conferir o preço/nível
+subindo certo (e o bônus de CP/produção da Party refletindo NA HORA, sem
+precisar reabrir a Cidade - fix do achado sobre `atualizar_snapshot_bonus`
+que faltava nos 2 fluxos); clicar "🏗️ Usar Upgrade de Construção" com um
+item guardado (de drop) e conferir que continua funcionando de graça;
+vencer um World Boss e conferir que o XP aparece em "📈 Progressão" sob
+"🐉 World Boss (vitória)"; abrir "📈 Progressão" - conferir Nível/XP atual
++ próximo limiar, e que uma
+ação que credita XP (Claim, Upar Nível, vencer andar da Torre, etc.)
+aparece na lista "Fontes de XP acumuladas" depois de feita.
+
+🔥 2 ajustes de UI na MESMA leva (também só testados via script): "🏗️
+Usar Upgrade de Construção" só aparece com pelo menos 1 item guardado
+(rótulo mostra a quantidade, "(x3)") - conferir que uma conta SEM item
+não vê o botão, e que ganhar um (drop/Diária) faz ele aparecer depois de
+clicar "🔄 Atualizar" (a View é reconstruída do zero agora, não reaproveita
+mais a mesma instância - conferir que isso não quebrou nada mais do
+painel); "📈 Progressão" foi pra ANTES de "🔄 Atualizar" na 1ª fileira
+("Coloca o progressao antes do botao atualizar, na primeira fileira") -
+conferir a ordem visual real no Discord.
+
+### Validar Marcos da Cidade por Construção + tela de detalhe reformulada ao vivo (2026-09-07)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Implementado a partir de `C:\Workspace\PANDORA_marcos_cidade.md` (especificação
+completa do usuário, salva em arquivo à parte - fórmula: "M = floor(P/5);
+B_marco = B_base × Lv; B_total = M × B_marco"): as 6 áreas (Militar/Saúde/
+Cultura/Administração/Comércio/Arcano) usam essa MESMA fórmula agora, sem
+retorno decrescente, Nível de Construção multiplicando direto o
+bônus-base (`cidade.bonus_area`/`BONUS_BASE_POR_AREA`). Correção no mesmo
+dia: "tem q começar ja no lv1" - uma área sem NENHUM Upgrade de Construção
+comprado floreava Lv0 (bônus zero); `cidade.nivel_efetivo_construcao`
+agora usa piso de 1. 2ª correção no mesmo dia: **"A tela das areas parece
+q n teve modificações"** - a tela de detalhe por área (`_embed_cidade_
+area_detalhe`, aberta pelos 6 botões do painel) ainda usava o layout
+ANTIGO (tabela ✅/🔒 de 50 a 10.000 personagens, de antes deste
+documento) - reformulada pro layout que o documento pede (campos
+"Trabalhando aqui"/"Bônus atual"/"Marcos"/"Próximo marco"/"📊 Detalhes do
+cálculo", sem listar marcos individualmente). 3ª correção no mesmo dia:
+**"Quero q as areas tenham as infos do calculo mais detalhadas... B_final
+= M × B_base × Lv × (1 + A)"** - "📊 Detalhes do cálculo" virou 3 blocos
+(Fórmula/Variáveis/Cálculo, `_texto_detalhe_calculo`) com a fórmula do
+usuário, conferida certa contra o código (Administração sai sem o termo
+`(1 + A)`, nunca cruza sobre si mesma). Tudo validado só via script
+direto contra a conta real (valores batendo com os exemplos do
+documento E com o exemplo numérico do pedido de detalhamento - Militar
+595 marcos × 10 × Lv10 × (1+0,179) = 70,2K CP), NENHUM clique real no
+Discord ainda. Falta confirmar ao vivo: abrir "🏙️ Cidade" e conferir os 6
+bônus do painel principal; clicar em
+cada um dos 6 botões de área e comparar a tela de detalhe com a seção
+"Exibição sugerida no Discord" do documento (Trabalhando aqui/Bônus
+atual/Marcos/Próximo marco/📊 Detalhes batendo); conferir que uma área
+sem NENHUM Upgrade de Construção comprado mostra "Lv1" (não "Lv0") e já
+rende bônus; comprar um Upgrade de Construção numa área e ver TUDO
+escalar (Bônus atual, valor de cada marco, e a linha de Detalhes); abrir
+a Torre e ver o Power da Party refletindo o novo bônus de Militar/Arcano.
+
+### Conferir 2 personagens não encontrados no catálogo (2026-09-06)
+
+**Prioridade:** Baixa | **Complexidade:** Baixa
+
+**Gwendolyn Stacy** (Spider-Gwen/Marvel) e **Shia Haulia** não foram
+achados no catálogo mesmo testando variantes de nome/gênero - ou não
+existem no banco sob nenhuma grafia próxima, ou pertencem a uma série
+que nunca foi importada. Confirmar se vale re-adicionar manualmente
+depois (fora do escopo desta leva de reclassificação).
+
+### Expandir desconto de Nível de Progressão pros outros custos (2026-09-06)
+
+**Prioridade:** Baixa | **Complexidade:** Média
+
+Usuário pediu Nível de Progressão influenciando "tudo, desde custo ate
+drop e rolls" - implementado por enquanto só em Treinamento Global/
+Potencial da Coleção (`db.desconto_por_nivel_progressao`, ver CHANGELOG).
+Faltam: Loja "Comprar"/"Garantir raridade"/Upgrade de Rolls/Upgrade de
+Claims/itens (`itens.custo_total_item`); Upar Nível/Aumentar Afinidade
+(individual E "Investir em Massa", `torre.investir_nivel_em_massa`/
+`investir_afinidade_em_massa`). Escopo reduzido de propósito nesta leva -
+threading de `guild_id`/`user_id` em várias funções de custo hoje PURAS
+(só recebem nível/raridade) espalhadas por `db.py`/`itens.py`/`torre.py`
+é um refactor maior, arriscado de fazer com pressa (`custo_proximo_
+nivel`/`custo_proxima_afinidade` são chamados em LOOP pra coleção inteira
+no Investir em Massa - precisa calcular o desconto 1x FORA do loop, nunca
+por personagem, mesmo cuidado já tomado em `gacha.rolar_varios`/
+`db.pontos_bonus_raridade_por_nivel` nesta mesma leva, senão reabre a
+classe de bug "GAIA não respondeu a tempo" por N+1 de consulta).
 
 ### `/merge` (comando de barra) provavelmente quebra ao ser usado (achado 2026-09-06)
 
@@ -104,19 +214,6 @@ haver uma disponível na conta de teste ainda). Também confirmar que
 "👥 Party"/`/party` (mesma tabela `colecao_equipe`) não foi afetado pela
 remoção da Vitrine.
 
-### Validar fix de "GAIA nao respondeu a tempo" na Party (Adicionar/Remover/Limpar) ao vivo (2026-09-03)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Achado em PRODUÇÃO pelo usuário (filtro por role ao adicionar na Party) -
-corrigidos os 4 pontos da `ViewEquipe` com o mesmo padrão (`defer()`
-faltando antes de trabalho síncrono/caro) - só validado por revisão de
-código até agora (a auditoria dos outros 3 pontos foi proativa, não
-reportada pelo usuário). PRECISA confirmar ao vivo: "👥 Party" -> "➕
-Adicionar" -> escolher uma role (DPS/Tank/Support, não "Todas") e
-confirmar que não trava mais; adicionar personagens de verdade; "➖
-Remover"; "🗑️ Limpar tudo" - os 3 continuam funcionando normalmente.
-
 ### Validar novo bônus de Série Favorita (exige série inteira + Afinidade) ao vivo (2026-09-03)
 
 **Prioridade:** Média | **Complexidade:** Baixa
@@ -157,7 +254,11 @@ Série, clicar "⬆️ Maximizar Nível" ou "💕 Maximizar Afinidade", digitar
 um orçamento e conferir que só as personagens DAQUELA série (que você
 já possui) sobem - o resto da coleção não deve ser afetado; tentar
 clicar sem possuir nenhuma personagem da série (deve recusar com
-mensagem clara, não abrir o Modal).
+mensagem clara, não abrir o Modal). Também falta confirmar (2026-09-06,
+`_reeditar_apos_acao_em_massa`) que o CARD do navegador (o que estava
+aberto quando o Modal foi chamado) é reeditado sozinho com o CP/Nível/
+Afinidade atualizados da personagem exibida no momento, sem precisar
+fechar e reabrir o navegador.
 
 ### Validar "Comprar Tudo" + revelação de classe na compra ao vivo (2026-09-03)
 
@@ -174,7 +275,11 @@ que não compra nada; comprar uma personagem NUNCA reivindicada em
 nenhum servidor (tanto pela Loja quanto pelo "🛒 Comprar"/"🛍️ Comprar
 Tudo" do navegador) com a GAIA rodando de verdade e confirmar que a
 classe é revelada igual um claim normal (antes saía sem classe pra
-sempre).
+sempre). Também falta confirmar (2026-09-06, `_reeditar_apos_acao_em_
+massa`) que, depois de "Confirmar", o CARD do navegador original (por
+trás da mensagem de confirmação) é reeditado sozinho mostrando "✅ Já é
+sua"/dono certo pra personagem exibida no momento, sem precisar fechar e
+reabrir o navegador.
 
 ### Validar navegador de Série Favorita (com Favoritar) + teto de 25 slots ao vivo (2026-09-03)
 
@@ -304,10 +409,7 @@ refletir o bloco correspondente); digitar uma posição maior que o total
 (deve clampar pro fim com aviso, não travar); confirmar que Upar Nível/
 Aumentar Afinidade/Favoritar/Divorciar/Atualizar continuam funcionando
 normalmente dentro desse novo fluxo (não devem ter mudado, mas usam
-`self.personagem`/`self.montar_embed()` da view reescrita). Também falta
-confirmar a imagem da 5★ ganha no World Boss (DM de recompensa com 2
-embeds - resumo + card com imagem, só quando alguma 5★ foi de fato
-concedida).
+`self.personagem`/`self.montar_embed()` da view reescrita).
 
 ### Validar valor de loja + mínimo do bot na Troca ao vivo no Discord (2026-09-02)
 
@@ -320,48 +422,6 @@ o texto de valor de loja aparece certo antes do botão "💰 Definir
 WiShards"; repetir escolhendo uma conta de BOT (GAIA#9308/ERIS#0983) como
 alvo e confirmar que a linha extra do mínimo aparece e o valor bate com
 o que `economia.avaliar_proposta_npc` de fato aceita depois de enviar.
-
-### Validar Auto-Defesa da Batalha ao vivo no Discord (2026-09-02)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementado e validado só contra uma cópia do `pandora.db` real (toggle,
-criação com `canal_id`, `defesa_automatica_para_desafio` produzindo o
-counter-pick certo, resolução fim a fim) - falta confirmar ao vivo: ligar
-"Auto-Defesa" no hub de Batalha e ser desafiado por outro jogador (deve
-resolver IMEDIATAMENTE, sem esperar clique); desafiar sem que o defensor
-responda por 10 minutos de verdade (`paineis.SchedulerBatalha`, tick de
-30s) e conferir que o resultado é anunciado no MESMO canal onde o desafio
-foi criado; desafiar uma conta de bot (GAIA#9308/ERIS#0983) e confirmar
-que a defesa automática continua contra-escolhendo certo (não virou
-aleatória de novo). O loop do `SchedulerBatalha` em si (rodando de
-verdade por 10 minutos reais contra um desafio pendente) nunca foi
-observado ao vivo, só simulado chamando as funções direto.
-
-### Validar fix de "GAIA nao respondeu a tempo" na Batalha ao vivo (2026-09-02)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Achado em PRODUÇÃO pelo usuário (não simulação) - desafiar um bot travava
-ao confirmar. Corrigido movendo `response.defer()` pra antes de qualquer
-`to_thread` nos 3 fluxos de confirmação de Batalha (Desafiar/Montar
-Defesa/Revanche) - só validado por revisão de código até agora, PRECISA
-confirmar contra um bot de verdade (o cenário exato que travou):
-desafiar ERIS#0983/GAIA#9308 por uma personagem 5⭐ com aposta alta,
-confirmar, e checar que resolve sem travar - e também os outros 2 fluxos
-(Montar Defesa contra um humano, Revanche).
-
-### Validar Merge (escolha na mesma raridade) ao vivo no Discord (2026-09-02)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementado e validado só contra uma cópia do `pandora.db` real (nunca um
-clique de verdade) - testar: sacrificar 5 personagens da mesma raridade,
-conferir a lista de "livres" dessa raridade aparecendo certo (até 25),
-escolher uma e confirmar que vira dona de verdade; testar especificamente
-com 5⭐ (bloqueado antes, "não tem pra onde subir" - agora deve funcionar
-normal); testar a corrida (escolher uma personagem que outra pessoa
-reivindicou no meio-tempo - deve recusar com mensagem clara, não travar).
 
 ### Validar Perfil redesenhado + Séries Favoritas ao vivo no Discord (2026-09-02)
 
@@ -392,24 +452,6 @@ completa de quem falta coletar (a sugestão original mencionava isso -
 faltando") - hoje só mostra os números agregados, sem drill-down pra lista
 de personagens específicos.
 
-### Validar Batalha por categoria + enfrentar bot + Diária/Rankings ao vivo (2026-09-02)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementado e validado só em cópia da produção - falta confirmar ao
-vivo: criar um desafio de Batalha 5x5 escolhendo categoria por posição
-(os 5 seletores avançando sozinhos), montar defesa do mesmo jeito,
-Revanche com a formação nova; desafiar a conta GAIA#9308 ou ERIS#0983
-(dona de personagens via auto-colecionador) e confirmar que resolve
-IMEDIATAMENTE sem esperar nada; clicar "🎁 Diária" (credita 1x, botão
-muda de cor depois de resgatada, WiShards = 150 × nível de Progressão
-ATUAL da conta - 2026-09-02, "multiplicada os wishards pelo nivel da
-progressao" - conferir que o valor mostrado bate com o nível de verdade,
-não um valor cacheado velho, e que o item raro garantido some no
-inventário "🎒"); os 3 rankings novos (Coleção/Soulmates/Torre) no
-seletor do botão "Ranking" ("📖 Perfil" saiu daqui - virou seu próprio
-item acima, redesenhado).
-
 ### GAIA precisa reiniciar pro prompt de classificação novo valer (2026-09-02)
 
 **Prioridade:** Média | **Complexidade:** Baixa
@@ -425,35 +467,6 @@ não recarrega código sozinha, e não foi reiniciada ainda nesta sessão
 (processo mais sensível que o ERIS - validar com o usuário antes de
 reiniciar). Depois do restart, vale acompanhar se Tank realmente fica
 menos raro nas próximas levas de reivindicações.
-
-### Validar "Bônus por Classe" ao vivo no Discord (2026-09-02)
-
-**Prioridade:** Média | **Complexidade:** Baixa
-
-Implementado e validado só em cópia da produção (soma por categoria,
-ordenação por bônus, progresso pro próximo marco, categoria vazia
-some) - falta confirmar ao vivo: abrir "⚔️ Bônus por Classe" numa conta
-com coleção real e conferir que os números fazem sentido contra o que já
-é aplicado de fato no CP (`torre.power_personagem`), e que o layout (1
-campo por categoria + lista de classes embaixo) fica legível mesmo com
-muitas classes numa categoria só (limite de 1024 caracteres por campo do
-Discord, sem paginação ainda).
-
-### Validar "Reivindicar Tudo" ao vivo no Discord (2026-09-02)
-
-**Prioridade:** Média | **Complexidade:** Baixa
-
-Implementado e validado só em cópia da produção (para exatamente quando os
-claims acabam, ordem de popularidade, pula quem já tem dono, remove card
-pendente, e agora também a otimização de paralelizar `revelar_classe` -
-benchmark simulado 5s → 1,5s pra 5 personagens nunca-classificadas) -
-falta confirmar ao vivo: clicar "🎯 Reivindicar Tudo" no hub com
-pendentes de verdade no servidor (rolados por outras pessoas também,
-idealmente algumas NUNCA reivindicadas antes em nenhum servidor, pra
-sentir a velocidade real da classificação em paralelo), conferir que o
-resumo fica legível mesmo reivindicando várias de uma vez, e que perder a
-corrida pra outro clique no meio do processo (2 pessoas reivindicando ao
-mesmo tempo) não gasta claim de quem perdeu.
 
 ### Validar fix de Upar Nível/Afinidade em massa + saldo no Modal ao vivo (2026-09-01)
 
@@ -499,127 +512,6 @@ botão "📊 Estatísticas" da Torre; botão "📈 Investir em Massa" (Nível e
 Afinidade) investindo na ordem certa (maior CP primeiro) e batendo o
 orçamento informado.
 
-### Validar World Boss (evento + recompensas/conquistas) ao vivo no Discord (2026-09-01)
-
-**Prioridade:** Alta | **Complexidade:** Alta
-
-Implementado e validado só em simulação isolada/cópia da produção (motor
-de combate, ciclo de vida completo, os 7 itens, as 20 conquistas, granting
-de 5★ via mock de `discord.Member`) - **nenhum clique real no Discord
-ainda, nenhum evento real esperou o horário fixo de verdade**. Testar:
-esperar um horário fixo (10h/14h/18h/22h Brasília) de verdade, entrar
-manualmente pela mensagem/hub, alternar categoria (toggle liga/desliga),
-ativar Entrada Automática e conferir que só entra DEPOIS das inscrições
-fecharem, os 2 bots entrando de verdade com CP = média dos humanos, o
-combate rodando 1 turno/minuto de verdade (não só em loop apertado do
-teste) com o log aparecendo no canal certo, e a vitória entregando DM de
-recompensa + resumo público + notificação de conquista nova.
-
-**RESOLVIDO (2026-09-02)** - achado em produção de verdade (print real de
-um evento contra o Devorador do Abismo, time de 3 jogadores, CP
-26.297/categoria): o time morria SEMPRE no turno 1 - HP_BASE (6000) já
-nascia menor que o ATK de QUALQUER Boss do catálogo (12-17 mil). Duas
-causas, as duas corrigidas em `worldboss.py`:
-1. **Bug de ordem contra a própria Seção 18** - o cheque de derrota rodava
-   logo depois do ataque do Boss, ANTES da cura (passo 6) ser aplicada -
-   Support nunca conseguia evitar uma morte. Corrigido pra dano líquido
-   por turno (`dano recebido = dano causado pelo Boss - dano curado`,
-   pedido do usuário), com o cheque de derrota só depois da cura.
-2. **`DANO_BASE`/`HP_BASE`/`CURA_BASE` descalibrados** - recalibrados
-   (10.000→14.000 / 6.000→45.000 / 500→7.500) e validados simulando o
-   motor real (`executar_turno`) 60x por Boss com o CP observado: 87% de
-   vitória agregada nos 10 Bosses (8 deles em 70-100%, Senhor da Morte/
-   Ceifar em 70% como degrau intermediário, Dragão Ancião/Enfurecer em 0% -
-   não é bug, ATK composto +10%/turno cresce mais rápido do que este time
-   consegue acompanhar, mecânica sendo o diferencial real de dificuldade,
-   como pedido). Também foi adicionada variação leve (±10%, `VARIACAO_
-   TURNO`) no dano causado e recebido a cada turno, pra o combate não ser
-   100% determinístico. HP/ATK de cada Boss no catálogo NÃO mudou -
-   mecânica continua sendo o que diferencia a dificuldade entre eles, não
-   o número bruto.
-
-Continua pendente (não coberto pelo fix acima): validar ao vivo com
-Discord de verdade (o fix foi validado só via simulação do motor,
-`executar_turno` chamado direto, nunca um evento real rodando no
-scheduler) - conferir se o "88% de vitória" simulado se sustenta com
-composições reais de jogadores (nem todo mundo concentra CP numa
-categoria só como no teste) e se o ritmo de ~15-25 turnos (15-25 minutos
-reais, 1 turno/minuto) fica bom de acompanhar no canal.
-
-**5 dificuldades independentes + CP recomendado (2026-09-02, pedido do
-usuário depois do fix acima, corrigido 2x - ver ARQUITETURA.md pro
-histórico completo do erro)** - `worldboss.cp_recomendado` agora busca por
-simulação real contra o motor (`_taxa_vitoria_simulada`, ~0,1-0,6s por
-chamada) em vez de multiplicar sobre o CP do personagem mais forte do
-servidor (1ª versão, corrigida - virava meta inatingível pra servidor
-pequeno). Validado só spawnando eventos numa CÓPIA do `pandora.db` real e
-conferindo os embeds - nunca um clique real no Discord. Vale reconferir o
-tempo de `cp_recomendado` (busca binária, ~20 simulações curtas) com uma
-carga real de scheduler rodando pra vários servidores ao mesmo tempo,
-antes de confiar cegamente nisso não atrasar outros ticks do scheduler de
-30s.
-
-Também falta: usar item Proteção/Revanche/Chave da Torre/Upgrade de
-Construção/Chamado através da UI de verdade (só as funções de regra de
-negócio foram testadas, os botões do painel "🎒 Inventário" nunca foram
-clicados de verdade), e comprar os 5 itens compráveis (`itens.ITENS_LOJA`
-- Roll/Claim Permanente saíram da Loja em 2026-09-03, ver CHANGELOG.md)
-pela Loja através da UI.
-
-### Validar Batalha 5x5 com Aposta de Personagem ao vivo no Discord (2026-09-01)
-
-**Prioridade:** Alta | **Complexidade:** Média
-
-Implementada e validada só numa CÓPIA da produção via script direto
-(Jokenpô, transferência+sink na vitória do desafiante, WiShards+
-manutenção na vitória do defensor, proteção de Soulmate, cooldown de 24h,
-bloqueio de "1 batalha por vez", Morte Súbita completa - ver
-`ARQUITETURA.md`) - **nenhum clique real no Discord ainda**. Testar com 2
-contas de verdade: `/waifu` -> ⚔️ Batalha -> Desafiar (UserSelect + busca
-por nome na coleção ALHEIA, `_ViewEscolherAlvoBatalha`), confirmar que a
-composição mostrada ao defensor bate com a Party real do desafiante
-(só contagem, nunca quem/CP/ordem), Montar Defesa revelando as rodadas
-com pausa visível editando a MESMA mensagem, Recusar reembolsando de
-verdade, Morte Súbita funcionando com os 2 jogadores cada um no PRÓPRIO
-painel, cooldown/limite diário bloqueando na hora certa, e o caso do
-defensor perder a personagem (troca/divórcio) ENQUANTO o desafio está
-pendente (deveria cancelar+reembolsar ao tentar montar defesa). Também
-falta validar que o preço de mercado (`raridade × valor_base_wishards`) dá
-uma aposta que parece razoável contra o economy real de uma conta
-desenvolvida - primeiro palpite, "balanceável depois" mesmo padrão de
-toda fórmula nova do PANDORA.
-
-### Validar reações de roll novas (favoritar/tag trade) e reclassificação de classe ao vivo (2026-09-01)
-
-**Prioridade:** Média | **Complexidade:** Baixa
-
-Migração de `colecao_cards_pendentes` (nova PK `(message_id, emoji)`) já
-rodou em produção sem erro (`db.inicializar()`) - falta confirmar ao vivo
-que um roll novo mostra as 3 reações (claim colorido/⭐/🔄) no card, que
-reagir com ⭐ reivindica E favorita, que 🔄 reivindica E aparece depois em
-"📚 Coleção" -> "🏷️ Marcadas pra troca", e que a reação de reencontro
-("já é sua") mostra o formato novo (compacto, marcando o dono) em vez do
-formato antigo. A reclassificação de `funcao_cidade` (Alquimista/
-Engenheiro/Elementalista) já rodou em produção - só falta conferir que o
-painel "🏙️ Cidade" reflete a mudança pras contas que têm essas 3 classes.
-
-### Validar que "GAIA não respondeu a tempo" parou de verdade (2026-08-30)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Causa raiz corrigida (`asyncio.to_thread` em todo scan de coleção
-inteira - ver `ARQUITETURA.md`, seção Auto-Party) e validada só em
-cópia/script (resultado idêntico direto vs. via thread + prova de que o
-event loop fica livre durante a chamada) - nenhuma validação ao vivo sob
-uso concorrente de verdade ainda. Testar: Auto-Party, "🏙️ Cidade" e
-"🔍 Personagem" repetidas vezes, IDEALMENTE com outra pessoa usando o bot
-ao mesmo tempo (é exatamente esse cenário - 2 interações concorrentes -
-que expunha o bug), confirmar que nenhum dos 3 cai mais em "GAIA não
-respondeu a tempo". Se cair de novo, o próximo suspeito é algum OUTRO
-scan de coleção inteira que ainda não foi convertido pra `to_thread`
-(checar `torre.ordenar_por_power`/`power_personagem` por chamadas soltas
-fora das já corrigidas).
-
 ### GAIA precisa reiniciar pra `funcao_cidade` valer em classificações NOVAS (2026-08-30)
 
 **Prioridade:** Alta | **Complexidade:** Baixa
@@ -633,27 +525,6 @@ foram cobertas por backfill manual (`backfill_funcao_cidade_2026-08-30.py`)
 - só personagens com classe NOVA (nunca vista) dependem do reinício.
 Avisado ao usuário antes de reiniciar, não feito sem confirmação.
 
-### Validar Progressão Global + Cidade ao vivo no Discord (2026-08-30)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementado e validado só na camada de dados/matemática numa CÓPIA do
-banco de produção (curva de XP, cascata de nível, `bonus_cp_global`
-batendo com os exemplos da análise, `power_personagem` com bônus,
-marcos de coleção, Divórcio/Merge/Torre creditando XP, produção da
-Cidade com teto de 168h) - nenhum clique real no Discord ainda. Testar:
-campo "📈 Progressão" aparece certo no hub, comprar "🏋️ Treinamento
-Global"/"📊 Potencial da Coleção" na Loja, abrir "🏙️ Cidade" (1ª visita
-não credita nada, visita seguinte credita proporcional ao tempo), CP
-mostrado em qualquer tela (Party/Torre/card) já reflete o bônus global.
-
-**Já validado ao vivo pelo usuário no mesmo dia** (achados corrigidos):
-"🎲 Rolar" do hub volta a rolar o ciclo inteiro, preço de "Garantir" bate
-com metade de "Comprar", CP aparece em "📚 Minha coleção" e no card
-"🔍 Personagem", Favoritar mudou pro card "🔍 Personagem" - só falta
-confirmar que essas 4 correções específicas também se comportam certo
-depois do próximo reinício do ERIS.
-
 ### ~~Taxas diferenciadas por Função da Cidade~~ RESOLVIDO (2026-08-30)
 
 Virou Cidade v2 - cada área tem efeito próprio (Militar/Arcano/
@@ -663,36 +534,6 @@ geram Soulstone/XP/WiShards, cada um só o seu) - ver "Cidade v2" no
 COLECAO`, literal do usuário) - já recalibradas 1x depois de testar
 contra uma conta real, mas continuam candidatas a ajuste fino depois de
 validar ao vivo por mais tempo.
-
-### Validar Cidade v2 + Soulstone/Afinidade + dropdown de nível ao vivo no Discord (2026-08-30)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementado e validado só na camada de dados/matemática numa CÓPIA da
-produção (3 ramos do reencontro, `subir_afinidade_ate` nunca seta
-Soulmate, remigração das 40 classes sem nenhuma fora da taxonomia v2,
-`calcular_power_party` batendo com a fórmula esperada, dropdown de
-nível/afinidade com custo total certo e rejeitando alvo inválido, select
-"Trocar de personagem" listando os candidatos certos e atualizando o
-card sem reconstruir a View) - nenhum clique real no Discord ainda.
-Testar: botão "💕 Aumentar Afinidade" e "⬆️ Upar Nível" abrindo o
-dropdown certo no card "🔍 Personagem" (opções/custos batendo, confirmar
-debitando certo, Cancelar voltando pro card, placeholder mostrando o
-saldo de WiShards/Soulstone certo), select "🔄 Trocar de personagem" no
-mesmo card trocando pra outra personagem da busca SEM sumir (dropdown
-continua ali depois de escolher, dá pra trocar de novo em seguida),
-"🏋️ Treinamento Global"/"📊 Potencial da Coleção" na Loja abrindo
-o mesmo tipo de dropdown (25 opções à frente, sem nível máximo, saldo de
-WiShards certo no placeholder, pular vários níveis de uma vez debitando
-o total certo), opções do select "🔍 Personagem"/"🔄 Trocar de
-personagem"/Merge/Party Adicionar-Remover mostrando ícone+CP+Nível+
-Afinidade certos (`_descricao_personagem_dropdown`, 1 função só pras 4),
-setas "◀️"/"▶️" no card "🔍 Personagem" trocando de personagem sem abrir
-o select e desabilitando certo nas pontas da lista, reencontro numa
-personagem em Afinidade 10 virando Soulmate de verdade, reencontro numa
-já-Soulmate creditando Soulstone, painel "🏙️ Cidade" mostrando o efeito
-certo de cada área, CP da Party já refletindo Bônus da Coleção/Militar/
-Arcano, bônus de CP por classe aparecendo na Torre/Party.
 
 ### Limpeza de nomenclatura duplicada em `colecao_classes` (achado 2026-08-30)
 
@@ -707,18 +548,6 @@ padrão já usado pra "Summoner"->"Invocador"/"Assassin"->"Assassino" numa
 correção anterior - parece que voltou a acontecer).
 
 ## Pendências da extração (2026-08-29)
-
-### Validar ao vivo no Discord depois do cutover
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-O cutover (ERIS apontando pro pacote novo, banco de produção migrado,
-processo reiniciado) foi validado via script direto contra o banco e via
-atividade automática do auto-colecionador (rolou/gravou no `pandora.db`
-novo com sucesso) - mas nenhum fluxo que depende de CLICAR um botão no
-Discord foi testado manualmente ainda depois do cutover (roll/claim via
-`/waifu`, trocas, Party, Prova de Soulmate). Testar isso é o próximo passo
-antes de considerar a extração 100% encerrada.
 
 ### ~~Limpar personagens com classe "Maid"/"Mediador"~~ QUASE RESOLVIDO (2026-08-30)
 
@@ -764,24 +593,6 @@ Ver "Migração de dado" em `ARQUITETURA.md` - as tabelas antigas continuam
 fisicamente no banco do ERIS (nunca mais lidas/escritas) como rede de
 segurança temporária. Apagar depois que este repo rodar em produção por um
 tempo sem incidente.
-
-### Validar Torre ao vivo no Discord
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Implementada e validada só na camada de dados/matemática (Power bate com
-a tabela do documento original, andar/restrição seguem a fórmula, vitória
-credita recompensa e avança andar - ver `ARQUITETURA.md`) - nenhum clique
-real no Discord ainda (as Views novas/alteradas passaram só pela varredura
-de sanidade de construção, não por um clique de verdade). Testar: upar
-nível e divorciar pelo card "🔍 Personagem" (`/waifu` -> "🔍 Personagem" -
-o Perfil não existe mais, tudo isso e Favoritar/Merge/Prova de Soulmate/
-Auto-coleta vieram pro hub principal, 3 linhas de botão agora), montar uma
-Party usando o filtro de role novo ao Adicionar, tentar o andar 1 na Torre
-(`/waifu` -> "🗼 Torre"), confirmar que perder não trava nada (retry sem
-cooldown), que os andares seguintes ficam mais difíceis de verdade e que
-o ícone de categoria + CP/Nível aparecem certos no embed da Torre, no
-texto "Sua Party" e nos SELECTs de Adicionar/Remover.
 
 ## Roadmap futuro
 

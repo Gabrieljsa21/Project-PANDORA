@@ -1,0 +1,23 @@
+[18:08:21] Backup já existe (C:\Workspace\Project-PANDORA\data\pandora_backup_pre_validar_classes_2026-09-03.db) - preservando o snapshot ORIGINAL, não sobrescrevendo.
+[18:08:22] Total a classificar: 4905
+[18:11:17] 50/4905 processados - 46 ok, 4 falha(s) até agora
+[18:14:20] 100/4905 processados - 93 ok, 7 falha(s) até agora
+[18:17:24] 150/4905 processados - 141 ok, 9 falha(s) até agora
+[18:20:27] 200/4905 processados - 190 ok, 10 falha(s) até agora
+[18:23:29] 250/4905 processados - 237 ok, 13 falha(s) até agora
+[18:26:30] 300/4905 processados - 286 ok, 14 falha(s) até agora
+[18:29:32] 350/4905 processados - 331 ok, 19 falha(s) até agora
+[18:32:35] 400/4905 processados - 378 ok, 22 falha(s) até agora
+[18:35:39] 450/4905 processados - 422 ok, 28 falha(s) até agora
+[18:38:42] 500/4905 processados - 472 ok, 28 falha(s) até agora
+[18:41:46] 550/4905 processados - 516 ok, 34 falha(s) até agora
+[18:44:46] 600/4905 processados - 559 ok, 41 falha(s) até agora
+[18:47:46] 650/4905 processados - 594 ok, 56 falha(s) até agora
+[18:50:45] 700/4905 processados - 622 ok, 78 falha(s) até agora
+[18:53:40] 750/4905 processados - 653 ok, 97 falha(s) até agora
+[18:56:35] 800/4905 processados - 676 ok, 124 falha(s) até agora
+[18:59:26] 850/4905 processados - 699 ok, 151 falha(s) até agora
+[19:02:03] 8 falhas SEGUIDAS - provável orçamento diário da Groq esgotado de novo. Parando cedo (rode de novo mais tarde).
+[19:02:03] PARADO CEDO: 716 classificadas antes de parar, 180 falha(s) no total.
+[19:02:03] Ainda sem classe no banco (checagem final): 4190
+[19:02:03] Amostra de falhas: Maltran; Isabeau; Kanata Sorami; Matsuri; Sana Kuranaka; Chise Hatori; Maya; Nana Iida; Aila Jyrkiainen; Sakura Setsumi; Morisato Megumi; Minami Iwasaki; Argo; Subaru; Kyou Goshouin; Chiyoda Mari; Hiromi Kurama; Mur Mur; Carisa Contzen; Itsuki; Subaru; Yumi Mamiya; Pasta; Nain; Hax; Karin Asaka; Shouma Takakura; Ryouko Kaji; Z Branch Operator; Shelter Nr. 7 Girl ... e mais 150

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Sincronização contínua do catálogo do Colecionador (2026-08-29) - até
 aqui a importação do get_waifu (`eris/colecao/importar_get_waifu.py`) era
-carga ÚNICA, precisava rodar na mão (ver TODO.md, "Roadmap futuro"). Rebaixa
+carga ÚNICA, precisava rodar na mão (ver docs/TODO.md, "Roadmap futuro"). Rebaixa
 pra um job PERIÓDICO, mesmo espírito de `eris/colecao/auto_colecionador.py`
 (loop `discord.ext.tasks` checando de tempos em tempos, sem precisar de
 cron/Task Scheduler externo).

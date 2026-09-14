@@ -25,8 +25,8 @@ CAMINHO_BANCO = os.path.join(PASTA_DADOS, "pandora.db")
 
 # 🔥 Base do webhook reverso (PANDORA -> GAIA) - mesma URL que o ERIS já usa
 # (`eris/config.py::URL_BASE_GAIA`) - o Colecionador pede pra GAIA classificar
-# personagem/gerar a Prova de Soulmate por HTTP, igual antes da extração; só
-# quem CHAMA de dentro do Python mudou de módulo (`eris.integrations.
-# gaia_webhook` -> `pandora.gaia_webhook`), a rota do lado da GAIA
-# (`integrations/iris_bridge.py`) não mudou nada.
+# personagem por HTTP, igual antes da extração; só quem CHAMA de dentro do
+# Python mudou de módulo (`eris.integrations.gaia_webhook` ->
+# `pandora.gaia_webhook`), a rota do lado da GAIA (`integrations/
+# iris_bridge.py`) não mudou nada.
 URL_BASE_GAIA = os.environ.get("GAIA_WEBHOOK_URL", "http://127.0.0.1:8766")

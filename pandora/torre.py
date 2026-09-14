@@ -52,19 +52,21 @@ def power_final(popularidade, nivel, afinidade, is_soulmate, power_base_override
     return base * multiplicador
 
 
-# 🔥 Fórmula do Power-alvo por andar (2026-08-30, número que o documento
-# original não definia - "impacto exato das classes/andares" ficou em
-# aberto) - geométrica, ~6%/andar: andar 1 pede ~1.000 (alcançável até
-# solo por 1-2 personagens recém-obtidas), andar 50 pede ~16.000 (perto do
-# teto de uma Party de 5 totalmente desenvolvida - Base 1.000+Nv.10+
-# Soulmate ×5 ×1,10 de composição ≈ 15.950) - continua crescendo depois
-# disso pra quem quiser seguir subindo.
+# 🔥 Fórmula do Power-alvo por andar - curva de potência calibrada pelo
+# usuário para o marco Progressão Lv200 → andar 400: exatamente 150K CP.
+# A exponencial antiga de 6% por andar escalava para 12,5 TRILHÕES no 400,
+# dezenas de milhões de vezes acima da Party real mais forte (201,5K).
+# `1.000 × (1 + (andar - 1) / 13,31847455)^1,45970145` preserva o início
+# acessível (andar 1 = 1K) e os marcos escolhidos pelo usuário: 200 =
+# 56,93K, 300 = 100K e 400 = 150K. Continua sem teto.
 _POWER_ALVO_BASE = 1000
-_POWER_ALVO_TAXA_CRESCIMENTO = 1.06
+_POWER_ALVO_ESCALA_ANDAR = 13.31847454785192
+_POWER_ALVO_EXPOENTE = 1.4597014494970986
+XP_BASE_POR_ANDAR = 30
 
 
 def power_alvo_andar(andar):
-    bruto = _POWER_ALVO_BASE * (_POWER_ALVO_TAXA_CRESCIMENTO ** (andar - 1))
+    bruto = _POWER_ALVO_BASE * (1 + (andar - 1) / _POWER_ALVO_ESCALA_ANDAR) ** _POWER_ALVO_EXPOENTE
     return round(bruto / 10) * 10
 
 
@@ -149,17 +151,30 @@ def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=Non
 
     🔥 Progressão Global da conta (2026-08-30, análise do usuário: "a
     personagem possui um limite de desenvolvimento. A conta não") - ÚNICO
-    ponto do pacote que aplica `db.bonus_cp_global` (`(CP + fixo) × (1 +
-    percentual)`, Seção 8) - toda Party/Torre/dropdown que já passa por
-    esta função herda o bônus automaticamente, sem precisar mudar mais
-    nada. Uma personagem no Nv.10/Afinidade 10/Soulmate (teto individual)
-    continua ficando mais forte no futuro conforme a CONTA evolui.
+    ponto do pacote que aplica `db.bonus_cp_global` (Seção 8) - toda
+    Party/Torre/dropdown que já passa por esta função herda o bônus
+    automaticamente, sem precisar mudar mais nada. Uma personagem no
+    Nv.10/Afinidade 10/Soulmate (teto individual) continua ficando mais
+    forte no futuro conforme a CONTA evolui.
 
     🔥 Bônus por CLASSE (2026-08-30, pedido do usuário: "a cd 5 [personagens
     da mesma classe] aumenta 50 [CP fixo p todas daquela classe]") - MESMO
-    ponto único, `db.bonus_cp_classe` soma junto do fixo global antes do
-    multiplicador percentual - incentiva colecionar várias da MESMA
-    classe (taxonomia aberta), não só desenvolver uma só.
+    ponto único, `db.bonus_cp_classe`.
+
+    🔥 Percentual SÓ multiplica a BASE, não os fixos (2026-09-06, achado do
+    usuário: "Esse bonus de classe ta impactando muito no CP do time...
+    aumentar o CP base das waifus deveria impactar muito mais" - `Potencial
+    da Coleção` sem teto (Seção 7, +2%/nível) tinha virado um multiplicador
+    de ×11 numa conta real (Nv.500), aplicado em cima de TUDO - `(base +
+    bonus_fixo + bonus_classe) × (1 + percentual)` deixava a base natural
+    em ~0,9% do CP final, o oposto de "base é o principal fator". Fórmula
+    virou `base × (1 + percentual) × (1 + bonus_serie) + bonus_fixo +
+    bonus_classe` - o multiplicador de conta (Progressão Global/Potencial
+    da Coleção/Série Favorita) continua sem teto e amplifica o que foi
+    INVESTIDO na personagem (popularidade/Fortalecimento/Ascensão/Nível/
+    Afinidade/Soulmate), mas os bônus FIXOS (globais da conta + de classe,
+    nenhum dos dois específico desta personagem) entram como extra por
+    cima, nunca amplificados pelo mesmo multiplicador.
 
     🔥 `nivel`/`bonus_global`/`cache_bonus_classe` opcionais (2026-08-30,
     corrige N+1 achado no Auto-Party: "atualiza a pt logicamente mas n
@@ -234,7 +249,7 @@ def power_personagem(personagem, guild_id, user_id, nivel=None, bonus_global=Non
     # aplica bônus nenhum, mesmo padrão de `bonus_global`/`cache_bonus_
     # classe` opcionais.
     bonus_serie = bonus_series.get(personagem.get("serie"), 0.0) if bonus_series else 0.0
-    power = (power + bonus_fixo + bonus_classe) * (1 + bonus_percentual) * (1 + bonus_serie)
+    power = power * (1 + bonus_percentual) * (1 + bonus_serie) + bonus_fixo + bonus_classe
     return power, nivel, categoria
 
 
@@ -290,6 +305,32 @@ def ordenar_por_power(personagens, guild_id, user_id, contexto_lote=None):
     return sorted(personagens, key=_power, reverse=True)
 
 
+def detalhes_power_party(membros, guild_id, user_id):
+    """Decompõe o Power da Party usando a fórmula vigente.
+
+    O dict devolvido é a fonte única tanto do cálculo real quanto da tela
+    de detalhes: soma individual, composição, Arcano, Militar e total.
+    """
+    categorias = [m.get("categoria_combate") for m in membros]
+    soma_individual = sum(m["power"] for m in membros)
+    tem_composicao = {"DPS", "Tank", "Support"}.issubset(set(categorias))
+    bonus_composicao = BONUS_COMPOSICAO_3_CATEGORIAS if tem_composicao else 0.0
+    apos_composicao = soma_individual * (1 + bonus_composicao)
+    bonus_militar_fixo, bonus_arcano_percentual = db.cidade_bonus_party(guild_id, user_id)
+    apos_arcano = apos_composicao * (1 + bonus_arcano_percentual)
+    total = apos_arcano + bonus_militar_fixo
+    return {
+        "categorias": categorias,
+        "soma_individual": soma_individual,
+        "bonus_composicao": bonus_composicao,
+        "apos_composicao": apos_composicao,
+        "bonus_arcano_percentual": bonus_arcano_percentual,
+        "apos_arcano": apos_arcano,
+        "bonus_militar_fixo": bonus_militar_fixo,
+        "total": total,
+    }
+
+
 def calcular_power_party(membros, guild_id, user_id):
     """`membros`: lista de dicts já com `power` e `categoria_combate`
     resolvidos por quem chama (`power_personagem`, um por personagem).
@@ -299,24 +340,28 @@ def calcular_power_party(membros, guild_id, user_id):
     🔥 Cidade v2 (2026-08-30, efeitos diferenciados por área) - depois do
     bônus de composição de sempre, aplica o SNAPSHOT de bônus de CP pra
     Party (`db.cidade_bonus_party` - Militar/Arcano já com Administração
-    multiplicada dentro, "Bônus da Coleção" = 1% de TODA a coleção, ver
-    `pandora.cidade`). Lê um snapshot pré-calculado (nunca escaneia a
-    coleção inteira aqui - hot path, roda a cada cálculo de Torre)."""
+    multiplicada dentro). Lê um snapshot pré-calculado (nunca escaneia a
+    coleção inteira aqui - hot path, roda a cada cálculo de Torre).
+
+    🔥 Percentual só multiplica a BASE, não os fixos (2026-09-06, mesmo
+    achado/fix de `power_personagem` no mesmo dia, agora achado aqui
+    também pelo usuário: "Uma pt de 250k ta mostrando power de 23,5B" -
+    `total + bonus_militar_fixo` deixa o Arcano (calibrado há dias pra uma escala
+    de CP bem menor, hoje em +50.500% numa conta real) multiplicar
+    TAMBÉM os bônus fixos de Militar/Coleção - nenhum dos dois é
+    "investimento" da Party, só CP calculado por fora. Fórmula virou
+    `total × (1 + bonus_arcano_percentual) + bonus_militar_fixo` - mesmo
+    princípio de `torre.power_personagem`."""
     if not membros:
         return 0.0, []
-    total = sum(m["power"] for m in membros)
-    categorias = [m.get("categoria_combate") for m in membros]
-    if {"DPS", "Tank", "Support"}.issubset(set(categorias)):
-        total *= 1 + BONUS_COMPOSICAO_3_CATEGORIAS
-    bonus_militar_fixo, bonus_arcano_percentual, bonus_colecao_fixo = db.cidade_bonus_party(guild_id, user_id)
-    total = (total + bonus_colecao_fixo + bonus_militar_fixo) * (1 + bonus_arcano_percentual)
-    return total, categorias
+    detalhes = detalhes_power_party(membros, guild_id, user_id)
+    return detalhes["total"], detalhes["categorias"]
 
 
 # 🔥 Recompensa por andar vencido (2026-08-30) - cresce com o andar,
 # incentivo pra continuar subindo em vez de estacionar.
-def recompensa_andar(andar):
-    return 50 * andar
+def recompensa_andar(andar, bonus_loot=0.0):
+    return round(50 * andar * (1 + bonus_loot))
 
 
 def _calcular_contexto(guild_id, user_id, ignorar_restricao=False):
@@ -520,14 +565,15 @@ def tentar_andar(guild_id, user_id):
         db.definir_chave_torre_ativa(guild_id, user_id, False)
     if contexto["venceu"]:
         andar = contexto["andar"]
-        recompensa = recompensa_andar(andar)
+        bonus_loot = db.bonus_loot_colecao(guild_id, user_id)
+        recompensa = recompensa_andar(andar, bonus_loot)
         novo_saldo = db.creditar_wishards(guild_id, user_id, recompensa, "torre_andar", f"Andar {andar}", str(andar))
         novo_andar = db.avancar_andar_torre(guild_id, user_id)
         # 🔥 XP de Progressão (2026-08-30, análise do usuário Seção 12:
         # "vencer andares pode conceder XP de Progressão... em checkpoints
         # as recompensas podem ser maiores") - ×5 a cada 50 andares.
-        xp = 10 * andar * (5 if andar % 50 == 0 else 1)
-        db.creditar_xp_progressao(guild_id, user_id, xp)
+        xp = round(XP_BASE_POR_ANDAR * andar * (5 if andar % 50 == 0 else 1) * (1 + bonus_loot))
+        db.creditar_xp_progressao(guild_id, user_id, xp, "torre_andar", f"Andar {andar}", str(andar))
         # 🔥 Estatística por personagem (2026-09-01, pedido do usuário:
         # "estatísticas de participação com sucesso na torre por
         # personagens") - só em vitória, nunca em tentativa perdida.
@@ -536,19 +582,18 @@ def tentar_andar(guild_id, user_id):
         contexto["novo_saldo"] = novo_saldo
         contexto["novo_andar"] = novo_andar
         contexto["xp_ganho"] = xp
+        contexto["bonus_loot_colecao"] = bonus_loot
     return True, None, contexto
 
 
-_LIMITE_ANDARES_SUBIR_MAX = 2000  # segurança contra loop infinito - inatingível numa conta real (custo cresce 6%/andar)
+_LIMITE_ANDARES_SUBIR_MAX = 2000  # segurança contra loop infinito; a Torre permanece sem teto.
 
 
 def subir_max(guild_id, user_id):
     """"Subir Max" (2026-09-04, pedido do usuário: "usado Subir torre ate
     o máximo possível mas seguindo as regras por andar e trocando de time
     p considerar ela") - sobe andar por andar em loop até perder, escolhendo
-    pra CADA andar a mesma composição de maior CP que `montar_auto_party`
-    já escolheria pro andar atual (respeitando a restrição de categoria
-    dele, `RESTRICOES_ANDAR`).
+    uma composição por variação de restrição, nunca por andar.
 
     Como nenhuma personagem sobe de Nível/Afinidade durante o loop, a
     MELHOR composição pra cada um dos 6 padrões de restrição é a MESMA
@@ -610,6 +655,9 @@ def subir_max(guild_id, user_id):
     xp_total = 0
     motivo_parada = "power_insuficiente"
     restricao_travada = None
+    bonus_loot = db.bonus_loot_colecao(guild_id, user_id)
+    vitorias = []
+    party_final_ids = None
 
     for indice in range(_LIMITE_ANDARES_SUBIR_MAX):
         restricao = restricao_andar(andar)
@@ -623,19 +671,13 @@ def subir_max(guild_id, user_id):
         if comp["power_total"] < alvo:
             motivo_parada = "power_insuficiente"
             break
-        if set(comp["ids"]) != equipe_atual_ids:
-            db.limpar_equipe(guild_id, user_id, "party")
-            for posicao, personagem_id in enumerate(comp["ids"], start=1):
-                db.definir_posicao_equipe(guild_id, user_id, "party", posicao, personagem_id)
-            equipe_atual_ids = set(comp["ids"])
         if usar_chave_aqui:
             db.definir_chave_torre_ativa(guild_id, user_id, False)
-        recompensa = recompensa_andar(andar)
-        db.creditar_wishards(guild_id, user_id, recompensa, "torre_andar", f"Andar {andar}", str(andar))
-        xp = 10 * andar * (5 if andar % 50 == 0 else 1)
-        db.creditar_xp_progressao(guild_id, user_id, xp)
-        db.registrar_vitoria_torre_personagens(guild_id, user_id, comp["ids"])
-        andar = db.avancar_andar_torre(guild_id, user_id)
+        recompensa = recompensa_andar(andar, bonus_loot)
+        xp = round(XP_BASE_POR_ANDAR * andar * (5 if andar % 50 == 0 else 1) * (1 + bonus_loot))
+        vitorias.append({"andar": andar, "recompensa": recompensa, "xp": xp, "personagem_ids": comp["ids"]})
+        party_final_ids = comp["ids"]
+        andar += 1
         recompensa_total += recompensa
         xp_total += xp
     else:
@@ -648,6 +690,8 @@ def subir_max(guild_id, user_id):
         # foi consumida dentro do loop acima; só falta cobrir quem perdeu
         # de cara e nunca entrou no bloco `usar_chave_aqui`.
         db.definir_chave_torre_ativa(guild_id, user_id, False)
+
+    db.registrar_vitorias_torre_em_lote(guild_id, user_id, vitorias, andar, party_final_ids)
 
     return {
         "andares_subidos": andar - andar_inicial, "andar_inicial": andar_inicial, "andar_final": andar,

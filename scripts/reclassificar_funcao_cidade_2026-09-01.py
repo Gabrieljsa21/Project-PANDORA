@@ -19,7 +19,7 @@ HABILIDADE em si (não a categoria de combate) já sugeria outra função:
 
 Não mexe nas outras 24 classes "Militar" (Guerreiro/Espadachim/Atirador/
 etc.) - são combatentes de verdade, a taxonomia v2 já não tem uma função
-"civil" própria pra elas (`ARQUITETURA.md`, "Cidade - IMPLEMENTADA": "classes
+"civil" própria pra elas (`docs/ARQUITETURA.md`, "Cidade - IMPLEMENTADA": "classes
 NÃO combatentes ainda não existem no catálogo de propósito... leva futura").
 O desbalanço restante (poucas classes de Saúde/Comércio no catálogo como um
 todo) é estrutural, não um erro de classificação - endereçado à parte via

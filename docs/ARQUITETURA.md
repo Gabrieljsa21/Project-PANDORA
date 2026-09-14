@@ -2,7 +2,7 @@
 
 ## Extraído do Project-ERIS (2026-08-29)
 
-O Colecionador (gacha estilo Mudae) nasceu dentro do [Project-ERIS](../Project-ERIS)
+O Colecionador (gacha estilo Mudae) nasceu dentro do [Project-ERIS](../../Project-ERIS)
 (bot de Discord) e cresceu MUITO ao longo de uma sessão de desenvolvimento
 intensa - `/waifu` (painel com 8 botões), economia completa (WiShards/loja/
 Merge/trocas), Party/Vitrine, e a Prova de Soulmate (situação + 3 opções de
@@ -247,20 +247,19 @@ duplicação de lógica já corrigida hoje em outro lugar da sessão).
   "com 11.266 curtidas como máximo atual" do texto; `power_final` com
   Base 300/Nv.10/Soulmate dá exatamente 1.500, Base 1.000/Nv.10/Soulmate
   dá exatamente 2.900 (os 2 extremos que o documento tabula).
-- `power_alvo_andar(andar) = round(1000 × 1,06^(andar-1), -1)` - número
-  novo (não estava no documento original), decidido nesta leva: andar 1
-  pede ~1.000 (alcançável até solo por 1-2 personagens recém-obtidas),
-  andar 50 pede ~17.000 (perto do teto de uma Party de 5 totalmente
-  desenvolvida, ≈15.950 com o bônus de composição), continua crescendo
-  depois disso pra quem quiser seguir subindo.
+- `power_alvo_andar(andar) = round(1000 × (1 + (andar - 1) / 13,31847455)^1,45970145,
+  -1)` - curva de potência sem teto, recalibrada em 2026-09-08 para bater
+  exatamente 100K no andar 300 e 150K no 400. Marcos: andar 1 = 1K, 50 =
+  9,51K, 100 = 22,47K, 200 = 56,93K, 300 = 100K e 400 = 150K.
 - `restricao_andar(andar)` - rotação FIXA de 6 padrões (índice `(andar-1)
   % 6`, andar 1 sempre sem restrição) - usa Categoria de combate como
   "vocabulário de restrição" (decisão já fechada numa sessão anterior)
   SEM precisar de geração por IA ainda. `checar_restricao` valida contra
   a Party (min_tank/min_support/max_1_tank/todas_categorias/so_dps).
-- `calcular_power_party` - soma `power_final` de cada membro + bônus de
-  composição (+10% se DPS+Tank+Support presentes, ÚNICO bônus de
-  categoria, decisão já fechada - nunca um multiplicador individual).
+- `detalhes_power_party` é a fonte única da conta da Party: soma dos CPs
+  individuais, composição (+10% se DPS+Tank+Support presentes), Arcano e
+  Militar. `calcular_power_party` apenas retorna o total desse mesmo
+  detalhamento; a fórmula é `(soma × composição) × (1 + Arcano) + Militar`.
 - `recompensa_andar(andar) = 50 × andar` - cresce com o andar, incentivo
   pra continuar subindo.
 - **Sem cooldown de retry** (diferente da Prova de Soulmate, que tem RNG
@@ -269,11 +268,11 @@ duplicação de lógica já corrigida hoje em outro lugar da sessão).
   sempre permitido.
 
 **UI**: botão "🗼 Torre" no hub `/waifu` (mostra o preview: andar atual,
-Power da Party vs. alvo, restrição, breakdown por personagem + botão
-único "Subir" que ataca o andar e edita a MESMA mensagem com o resultado
-- mesmo padrão de mensagem única já usado na Prova de Soulmate/Party) e
-botão "⬆️ Nível" no Perfil (reaproveita o mesmo select genérico de
-Favoritar/Divorciar/Merge/Prova de Soulmate).
+Power da Party vs. alvo, restrição e breakdown por personagem). O botão
+ephemeral **📊 Detalhes da Party** exibe cada etapa da mesma fórmula usada
+na validação. No card **🔍 Personagem**, **📊 Detalhes CP** abre a fórmula
+individual completa (Base, Nível, Afinidade/Soulmate, multiplicadores e
+fixos), sem confundir esses fatores com os bônus da Party.
 
 🔥 **Achado ao validar (sanidade extra depois da Torre)**: uma varredura
 instanciando toda `View` de `paineis.py` com argumentos plausíveis (sem
@@ -1013,14 +1012,19 @@ antiga) - substitui a "Prova de Soulmate" (RNG/pity) como o jeito de
 virar Soulmate. Reencontro numa personagem JÁ Soulmate ("cópia") credita
 +10 Soulstone extra (Afinidade não mexe mais, já no teto).
 
-**"Prova de Soulmate" - só o botão saiu** (decisão explícita do usuário:
-"só tirar o botão do hub, recomendado") - `gacha.tentar_prova_soulmate`/
-`obter_textos_prova_soulmate`, `db.registrar_tentativa_soulmate`/
-`personagens_prontas_para_prova`, `paineis._ViewEscolherRespostaProva`/
-`_ViewEnfrentarProva`/`_embed_resultado_prova`, `gaia_webhook.
-pedir_prova_soulmate` ficam intactos e DORMENTES (ninguém mais aciona) -
-reaproveitar ou apagar de vez fica pra quando a conversão por Soulstone
-for desenhada de verdade.
+**"Prova de Soulmate" - REMOVIDA de vez (2026-09-14)** - ficou DORMENTE
+desde 2026-08-30 (decisão de então: "só tirar o botão do hub, recomendado",
+guardando `gacha.tentar_prova_soulmate`/`obter_textos_prova_soulmate`,
+`db.registrar_tentativa_soulmate`/`personagens_prontas_para_prova`,
+`paineis._ViewEscolherRespostaProva`/`_ViewEnfrentarProva`/
+`_embed_resultado_prova`, `gaia_webhook.pedir_prova_soulmate` intactos pra
+um possível reaproveitamento quando a conversão por Soulstone fosse
+desenhada). Decisão revista: removida por completo (código + colunas
+`prova_soulmate_*`/`soulmate_tentativas`/`soulmate_ultima_tentativa_em` via
+`DROP COLUMN`) junto com a rota irmã do lado da GAIA (`POST /eris/
+colecao_prova_soulmate`) - achada ainda dormente ao auditar trabalho que o
+usuário tinha pedido pro GPT fazer no repo. Se a conversão por Soulstone for
+desenhada no futuro, é código novo - não depende mais deste ter sobrevivido.
 
 ## Batalha 5x5 com Aposta de Personagem (2026-09-01)
 
@@ -1371,7 +1375,7 @@ repetir):
 1. **1ª tentativa (errada)**: dei a cada um dos 10 Bosses uma dificuldade
    FIXA no catálogo (Dragão Ancião sempre "difícil", etc.). Corrigido pelo
    usuário: **"cada boss pode variar entre todas as dificuldades"** -
-   dificuldade não é propriedade do Boss, é sorteada à parte no spawn,
+   a dificuldade é sorteada à parte quando o Boss aparece,
    independente de qual dos 10 saiu. E não existia nenhuma dificuldade
    nomeada antes desta sessão (só hp/atk fixos por Boss) - pedido final:
    **"mantém os status atual como difícil"** (os números originais do
@@ -2040,27 +2044,23 @@ Ascensão (sem teto, sempre sequencial) já é um contador simples,
 `nivel_ascensao` - não precisa de bitmask porque nunca tem lacuna (mesmo
 padrão de todo outro "nível de upgrade" do projeto).
 
-**O algoritmo central resolve gap-filling sem casos especiais:**
+**O algoritmo central segue a progressão do slot, sem pular custos pela Base natural:**
 ```python
 def _estado_fortalecimento(popularidade, bitmask):
-    atual = torre.power_base(popularidade)  # fórmula original, intocada
+    base_natural = torre.power_base(popularidade)
+    atual_slot = 300
     for indice, (_lo, hi) in enumerate(PATAMARES_FORTALECIMENTO):
-        if atual >= hi:
-            continue  # natural já superou esse patamar - nunca precisa comprar
         if bitmask & (1 << indice):
-            atual = hi  # patamar comprado NESSE slot - sobe
+            atual_slot = hi
         else:
-            return atual, indice  # lacuna - para aqui, é o próximo a comprar
-    return atual, None  # 1000 atingido, só Ascensão daqui pra frente
+            return max(base_natural, atual_slot), indice
+    return max(base_natural, atual_slot), None
 ```
-Isso sozinho cobre: personagem de Power natural alto entrando num slot
-zerado (pula os patamares abaixo do natural sem checar bit nenhum);
-personagem de Power natural baixo entrando num slot com patamares ALTOS
-já comprados (para na primeira lacuna, mesmo que 900→950/950→1000 já
-estejam comprados - só alcança eles depois de preencher tudo abaixo);
-Power natural desalinhado tipo 873 (o próximo patamar é sempre o GLOBAL
-seguinte - 850→900 - custando o preço CHEIO daquele patamar, nunca uma
-fração proporcional à distância real coberta).
+Todo ocupante começa obrigatoriamente no patamar 300→350. Se a Base natural
+já for 951, os patamares até 950 não mudam o CP efetivo, mas continuam
+necessários para chegar a 1000 e liberar Ascensão. Bits comprados fora de
+ordem nunca geram efeito: o primeiro bit ausente continua sendo o próximo
+patamar a comprar.
 
 **O hook no Power Base é a parte que precisava de mais cuidado pra não
 violar a regra "não alterar a fórmula original".** `torre.power_final`
@@ -2374,6 +2374,103 @@ Nenhuma mudança de schema/comportamento visível além da velocidade (mesmo
 filtro/ordenação/descrição de sempre, só bem mais rápido). Validado só por
 leitura de código (sem medição real de tempo antes/depois) - ver
 `docs/TODO.md`.
+
+## Fusão por raridade e nomes (2026-09-07)
+
+O fluxo antigo cortava a coleção nas 25 personagens de maior CP antes da escolha. Isso escondia quase todas as personagens de raridade baixa e impedia selecionar sacrifícios específicos em coleções grandes.
+
+`ViewHubWaifu._abrir_merge` agora carrega a coleção inteira em thread, agrupa por raridade e oferece somente grupos com pelo menos 5 personagens. `_ViewEscolherRaridadeMerge` recebe a raridade e `_ModalNomesSacrificioMerge` coleta cinco nomes separados.
+
+`consulta.resolver_nomes_unicos` centraliza a resolução. A ordem é match exato, substring e similaridade conservadora. Cada ID é consumido da lista de candidatos depois de resolvido, impedindo selecionar a mesma personagem duas vezes. A validação final de posse, raridade, Party e Afinidade continua em `economia.validar_merge`, e a operação atômica continua em `economia.executar_merge`.
+
+## Referência de balanceamento Torre/Construção por Progressão + custo linear do Upgrade de Construção (2026-09-07)
+
+Usuário trouxe uma regra de balanceamento (`andar_torre_esperado = nivel_progressao × 2`; `nivel_construcao_esperado = nivel_progressao ÷ 2`, tratado como MÉDIA esperada entre as 6 áreas, não obrigação individual) depois de comparar a conta de teste: Progressão Lv224, Torre andar 398 (bate com o esperado, ~2x - **Torre CONFIRMADA no ritmo certo, `torre.power_alvo_andar` não mudou**) contra Construção média Lv14,8 (89 níveis somados / 6 áreas) - bem abaixo do Lv112 esperado.
+
+Causa raiz isolada: `itens.preco_unidade_loja` pro item "🏗️ Upgrade de Construção" usava o MESMO crescimento geométrico de todo item da Loja (`FATOR_CRESCIMENTO_PRECO_LOJA=1.15`, composto por unidade vitalícia já comprada, `db.total_comprado_item`) - na 86ª unidade (85 já compradas) já custava 606M WiShards. O design agora pede ~600 unidades vitalícias no TOTAL (Lv100 médio × 6 áreas) pra bater a régua - nenhum fator geométrico, por menor que seja, suporta essa escala sem eventualmente explodir (só adia o problema).
+
+Fix: `preco_unidade_loja` passou a tratar "upgrade_construcao" como caso especial - preço LINEAR (`base + INCREMENTO_UPGRADE_CONSTRUCAO × unidades_ja_compradas`, `INCREMENTO=40_000`) em vez de geométrico. Todo o resto do catálogo (Proteção/Revanche/Chave da Torre/Chamado) continua geométrico - são comprados MUITO menos vezes na vida útil de uma conta, nunca precisam suportar centenas de compras. Calibrado contra a conta real: preço da unidade nº86 caiu de 606M pra 3,4M; custo total de 0 até 600 unidades fica ~7,2B WiShards (perto do saldo real de teste, 7,17B) - decisão de calibração, não fórmula matemática derivada, "balanceável depois" como todo valor novo.
+
+### Ledger de XP de Progressão + botão "📈 Progressão" na Cidade (2026-09-07)
+
+Pedido do usuário (mesma leva): "depois na tela de cidade vc traz um botao de progressao, mostrando as fontes de xp acumaladas ate entao". Até aqui `db.creditar_xp_progressao(guild_id, user_id, quantidade)` só somava XP - sem NENHUM rastro de origem (diferente de `creditar_wishards`/`creditar_soulstone`, que já tinham ledger com `origem`/`motivo`/`referencia` desde a Seção 6 do plano original).
+
+Fix: `creditar_xp_progressao` ganhou `origem` OBRIGATÓRIO (mesmo padrão dos outros 2 ledgers, nunca opcional/com default) + tabela nova `colecao_xp_progressao_ledger` (cópia estrutural de `colecao_wishards_ledger`/`colecao_soulstone_ledger`, só troca `saldo_resultante` por `nivel_resultante`, já que Progressão não é um saldo escalar simples). Os 9 pontos do código que credita XP foram etiquetados: `cidade_producao` (produção da Cidade), `torre_andar` (vitória de andar, tentativa única ou "Subir Max"), `claim` (+ `origem_wishards` reaproveitado no helper compartilhado de admin/auto-colecionador, mesma granularidade do ledger de WiShards), `divorcio`, `upar_nivel_personagem`, `merge`, `marco_colecao`. Nova `db.xp_por_origem(guild_id, user_id)` soma o ledger agrupado por origem - só cobre XP creditado a PARTIR de agora (tabela nova, sem histórico anterior pra atribuir retroativamente, documentado na própria tela "📈 Progressão").
+
+## "Upar Construção" substitui o item da Loja + Comércio recalibrado (2026-09-07)
+
+Ao propor a tabela de custo em faixas (100K/250K/400K/.../5M por bloco de 10 níveis, igual pras 6 áreas), perguntei ao usuário se isso era o preço do item "🏗️ Upgrade de Construção" na Loja (contador vitalício compartilhado, só a fórmula mudando de linear pra faixas) ou um custo POR ÁREA/nível (mecanismo novo). Resposta: **"Vamos tirar esse item da loja e permitir o jogador upar diretamente a construção... vamos pular essa parte de item do fluxo. O item ainda vai continuar existindo apenas como drop e recompensa, p n ter q pagar o upgrade"**.
+
+Implementado: `itens.PRECOS_LOJA_ITENS` perdeu a entrada "upgrade_construcao" (não é mais comprável) - `ITENS_LOJA`/o loop que monta os botões da Loja são DATA-DRIVEN a partir dele, então o item some da Loja sem tocar em UI nenhuma. `CATALOGO_ITENS`/`PESOS_DROP_RARO` continuam intactos (ainda é um drop raro válido do World Boss/prêmio da Diária). Novo `itens.upar_construcao(guild_id, user_id, area, quantidade)` - mesma validação de teto dinâmico de `usar_upgrade_construcao`, mas debita WiShards direto (`itens.custo_total_construcao`/`FAIXAS_CUSTO_CONSTRUCAO`) em vez de consumir item - os 2 convivem em paralelo (item = grátis pra quem tiver, WiShards = caminho sempre disponível). Botão novo "💰 Upar Construção" no `ViewCidadeHub` (substitui o antigo "🛒 Comprar Upgrade de Construção") reaproveita a MESMA `_ViewEscolherAlvo` do fluxo por item, só troca a função de custo e o "saldo" mostrado (WiShards em vez de itens guardados).
+
+Achado no processo (não pedido, mas correção direta relacionada): nenhum dos 2 fluxos de Upgrade de Construção chamava `cidade.atualizar_snapshot_bonus` depois de mudar o Nível - o bônus de CP da Party só refletia a mudança na PRÓXIMA visita à Cidade. Corrigido nos 2 `_confirmar` (`_fluxo_usar_upgrade_construcao` e o novo `_fluxo_upar_construcao_direto`).
+
+Mesma leva: **"a partir da decisão de reduzir o Comércio para base 50"** - `cidade.BONUS_BASE_POR_AREA["Comércio"]` caiu de 250 pra 50 (Comércio rendia WiShards rápido demais perto do novo custo de Upar Construção, que também é pago em WiShards - um ciclo "Comércio paga o próprio upgrade sozinho" desequilibrado). Conferido contra a tabela do usuário (269 marcos atuais, Lv variando de 10 a 100 com Militar/Administração no mesmo Lv hipotético) - todos os 10 pontos bateram.
+
+## Teto dinâmico de Construção: degrau 10 -> 50 + limite de 25 opções do Discord (2026-09-07)
+
+Pedido inicial: "Esse limite de so poder upar de 10 em 10 enquanto todas as construcoes n tiverem maximizadas, se o progressao tiver bem acima do nivel de construcao esperado, pode aumentar o limite p 50lvs, sempre na faxia 50,100,150". Implementei uma 1ª versão CONDICIONAL - degrau vira 50 só quando `nivel_progressao ÷ 2` está bem acima da área mais atrasada, revertendo pro degrau de 10 ao alcançar o nível esperado (o usuário confirmou o comportamento com um exemplo concreto: "No meu caso... Lv200 [progressão], construções deveriam estar no 100 mas estao no 20... quando todas chegarem no 100... volta a regra do 10 em 10").
+
+Antes de eu terminar de ajustar o clamp de segurança, o usuário simplificou de vez: "Na verdade pode manter sempre 50 como cap" + "P subir p 51, todas tem de ta 50. P subir p 101, todas tem de ta em 100" - ou seja, SEM condição nenhuma, `NIVEL_MAXIMO_CONSTRUCAO_BASE` virou 50 permanentemente (era 10), mesma mecânica de sempre (área mais atrasada trava o teto de todas), só o número do degrau que mudou. A versão condicional foi descartada por completo - nunca chegou a ir pro Discord.
+
+Achado no processo, antes de reverter pra versão simples: um degrau de 50 abre uma janela de até 49 níveis entre o nível atual de uma área e o teto (ex.: área ainda no Lv1, teto 50) - `discord.ui.Select` do discord.py aceita no máximo 25 `SelectOption`; toda vez que essa janela existir 26+, `_ViewEscolherAlvo` (componente compartilhado por Upar Nível/Afinidade/Fortalecimento/Loja/Construção) geraria mais opções que o Discord aceita, quebrando o dropdown. Nunca foi um problema até aqui porque Nível/Afinidade de personagem sempre tiveram janela de 10, Fortalecimento 14 - nenhum caller antes deste chegava perto de 25. Corrigido com um clamp `valor_maximo = min(valor_maximo, valor_atual + 25)` DENTRO do próprio `_ViewEscolherAlvo.__init__`, não em cada caller - protege qualquer uso futuro do componente, não só Construção. A lógica de "já está no teto" continua usando o teto REAL (sem clamp) - o clamp é só uma proteção de EXIBIÇÃO do dropdown, quem quiser subir mais que 25 de uma vez faz em 2+ confirmações.
+
+## CP da Cidade exibido só na Coleção (2026-09-08)
+
+Os cards e detalhes das seis estruturas não mostram mais CP por área. A fórmula delas depende apenas de quantidade de personagens, marcos, nível e Administração; manter o CP visível sugeria uma influência inexistente. O CP total da coleção continua no campo 👑 Bônus da Coleção, onde determina o multiplicador de loot.
+
+## Upgrades de CP: nomes alinhados ao efeito (2026-09-08)
+
+"Treinamento Global" passou a se chamar **Treinamento da Coleção**: o nome descreve que cada nível concede CP fixo a cada personagem da coleção. "Potencial da Coleção" passou a ser **Maestria da Coleção**, o multiplicador percentual de CP. Os identificadores de banco foram preservados para não exigir migração; só os textos visíveis ao jogador mudaram. Na conta ajustada, os dois níveis foram alinhados à Progressão Lv200.
+
+## Slots de Séries e Waifus: tabela linear (2026-09-08)
+
+Pedido do usuário: "faz sentido mudar o custo dos slots de serie e waifu favorita p tabela abaixo?". As duas constantes agora usam a mesma tabela gerada de forma determinística: o nível de upgrade 1–20 libera os slots 6–25 e custa `nível × 5M` WiShards. Assim, o 6º slot custa 5M, o 25º custa 100M e os 20 adicionais somam 1,05B por sistema. A antiga curva exponencial chegava a 16B no último slot e 31,99B no total, desproporcional à ampliação de opções que os slots representam.
+
+## Bônus da Coleção: loot linear pelo CP total (2026-09-08)
+
+Pedido do usuário: "Esse bonus da colecao vai aumentar o loot das torres, dos World Boss e Clains". O antigo `cp_bonus_colecao_fixo` foi removido do cálculo de Party — ele repetia a função do Militar. O snapshot da Cidade agora guarda `bonus_colecao_loot_percentual`, calculado por `cidade.bonus_loot_colecao(cp_total)`: `CP total / 100.000.000` como fração (equivale a `CP total / 1M` em percentual), sem teto. Assim, 308M CP = 3,08 = +308%, e recompensa final = `base × 4,08`.
+
+O snapshot é atualizado ao abrir a Cidade e nas ações que já chamam `cidade.atualizar_snapshot_bonus`; não se recalcula a coleção em cada claim, para preservar o tempo de resposta do caminho mais frequente. O multiplicador se aplica aos recursos da Torre (WiShards/XP), World Boss (WiShards/XP/Soulstone) e claim normal (WiShards/XP), nunca a personagens, itens raros ou às taxas/hora da Cidade.
+
+## Militar e Arcano: multiplicador de nível de 5% (2026-09-08)
+
+Pedido do usuário: "multiplica o Arcano tbm (Lv × 0,05)". `cidade.multiplicador_nivel` agora aplica `Lv × 0,05` a Militar e Arcano; Saúde, Cultura, Administração e Comércio preservam o multiplicador integral. O cruzamento da Administração continua no final para ambos, portanto a fórmula efetiva é `M × B_base × (Lv × 0,05) × (1 + A)`. A tela de detalhe reconhece as duas áreas e apresenta a mesma fórmula e o multiplicador numérico correto.
+
+## Backup versionado da classificação de personagens (2026-09-14)
+
+Pedido do usuário depois de perguntar "e se eu for baixar o projeto em outro
+PC" sobre `data/catalogo_get_waifu.json` estar no `.gitignore`: `data/
+pandora.db` já não ia pro git desde sempre (regra `data/*.db`, banco de
+runtime) - um clone novo do repo vinha com o banco VAZIO, perdendo as ~8,7k
+classificações de personagem já feitas via LLM (custo real de chamada,
+nada trivial de refazer). `raridade` não tem esse problema (recalculada
+automaticamente por `db.recalcular_raridade` a cada reimportação do
+catálogo) - só `classe`/`classe_exibicao` são trabalho genuíno e
+irrecuperável.
+
+Solução: `db.exportar_classificacao_personagens()`/`aplicar_classificacao_
+personagens()` (novo) + dois scripts (`scripts/exportar_classificacao_
+personagens.py`, `scripts/aplicar_classificacao_personagens.py`) que
+fazem snapshot/restauração por `fonte_id` (id estável do catálogo externo,
+sobrevive a reimportação) num JSON pequeno (~850KB pra 8,7k personagens,
+nada a ver com os 94MB do catálogo bruto) - `data/classificacao_
+personagens.json`, este SIM commitado no git (só os `.db` e o `.json` do
+catálogo bruto ficam de fora). Testado ponta a ponta numa cópia do banco
+real: exportar → zerar `classe`/`classe_exibicao` → reaplicar → contagem e
+amostra batendo 100% com o original.
+
+Isso também responde "vamos continuar dependendo de fonte externa pra
+gerar personagem?" - só pros personagens NOVOS que o get_waifu adicionar no
+futuro. Os ~31k já importados (base do catálogo) e as ~8,7k classificações
+ficam permanentemente seguros no `pandora.db` local + agora também no git,
+independente da fonte externa continuar no ar.
+
+Não virou automático (nenhum hook/cron chamando o export sozinho) de
+propósito - rodar `python -m scripts.exportar_classificacao_personagens`
+de vez em quando (depois de uma leva grande de classificação nova) é
+suficiente; automatizar isso é trabalho futuro se o esquecimento virar
+problema real.
 
 ## Pendências
 
