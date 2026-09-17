@@ -525,16 +525,6 @@ foram cobertas por backfill manual (`backfill_funcao_cidade_2026-08-30.py`)
 - só personagens com classe NOVA (nunca vista) dependem do reinício.
 Avisado ao usuário antes de reiniciar, não feito sem confirmação.
 
-### ~~Taxas diferenciadas por Função da Cidade~~ RESOLVIDO (2026-08-30)
-
-Virou Cidade v2 - cada área tem efeito próprio (Militar/Arcano/
-Administração são bônus de CP ao vivo pra Party; Saúde/Cultura/Comércio
-geram Soulstone/XP/WiShards, cada um só o seu) - ver "Cidade v2" no
-`ARQUITETURA.md`. Taxas ainda são primeiro palpite (exceto `TAXA_BONUS_
-COLECAO`, literal do usuário) - já recalibradas 1x depois de testar
-contra uma conta real, mas continuam candidatas a ajuste fino depois de
-validar ao vivo por mais tempo.
-
 ### Limpeza de nomenclatura duplicada em `colecao_classes` (achado 2026-08-30)
 
 Ao remigrar `funcao_cidade` pra v2, apareceram 2 pares de classe
@@ -549,29 +539,21 @@ correção anterior - parece que voltou a acontecer).
 
 ## Pendências da extração (2026-08-29)
 
-### ~~Limpar personagens com classe "Maid"/"Mediador"~~ QUASE RESOLVIDO (2026-08-30)
+### Reclassificar as 2 últimas personagens com classe "Maid"/"Mediador"
 
-7 das 9 reclassificadas manualmente (bio de cada uma lida direto do
-banco, `colecao_personagens.descricao` - mesmo texto que a GAIA veria):
-Mei Tachibana -> Eremita (guardada/desconfiada, mas honesta - classe
-NOVA, só ela usa até agora), Setsuna Kiyoura -> Curandeira (protege a
-felicidade da amiga, acalma com empatia), Erasa -> Barda (carismática,
-anima o grupo), Rio Nanase -> Sábia (severa, supervisiona os estudos dos
-outros), Madoka Yachi -> Sábia (dura por fora, guia a filha a crescer),
-Aisha Hart -> Curandeira ("muito gentil e misericordiosa"), Fiona Thyme
--> Guardiã/Tank (Huntress leal, protege seu povo em vez de buscar
-glória).
+**Prioridade:** Baixa | **Complexidade:** Baixa
 
-**2 ficaram de propósito, bio fina demais pra decidir sem chutar**:
-Ayame Satsuki (Qwaser of Stigmata, "Maid") - personagem de apoio/
-fanservice, obcecada por outra personagem, sem estilo de combate nem
-poder próprio descrito (o Soma dela é SUGADO por outra personagem, não
-usado por ela); Hina Ebina (Oregairu, "Mediador") - descrição de só 1
-frase ("garota quieta que anda com a turma de Hayama"), sem
-personalidade suficiente pra traduzir com confiança. Precisa de mais
-contexto (bio mais completa/conferir a obra de verdade) antes de
-reclassificar essas 2 - não é um find-and-replace, cada uma precisa de
-julgamento individual.
+As outras 7 de 9 já foram reclassificadas manualmente (ver CHANGELOG.md,
+2026-08-30) - restam Ayame Satsuki (Qwaser of Stigmata, "Maid") e Hina
+Ebina (Oregairu, "Mediador"), deixadas de propósito por terem bio fina
+demais pra decidir sem chutar: Ayame é personagem de apoio/fanservice,
+obcecada por outra personagem, sem estilo de combate nem poder próprio
+descrito (o Soma dela é SUGADO por outra personagem, não usado por ela);
+Hina tem descrição de só 1 frase ("garota quieta que anda com a turma de
+Hayama"), sem personalidade suficiente pra traduzir com confiança.
+Precisa de mais contexto (bio mais completa/conferir a obra de verdade)
+antes de reclassificar essas 2 - não é um find-and-replace, cada uma
+precisa de julgamento individual.
 
 ### Validar Modo Auto-coleta por usuário ao vivo (:50/:55 de verdade)
 
