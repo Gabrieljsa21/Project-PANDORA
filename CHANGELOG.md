@@ -7,10 +7,6 @@ Histórico de alto nível do que muda no PANDORA, por versão. Ver
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-14
-
-Primeira versão: reúne todo o histórico registrado até aqui. A partir dela, cada PR já sai com a própria versão.
-
 ## [0.2.0] - 2026-10-14
 
 Fecha numa versão tudo o que estava acumulado sob `[Unreleased]` desde a 0.1.0.
