@@ -2472,6 +2472,12 @@ de vez em quando (depois de uma leva grande de classificação nova) é
 suficiente; automatizar isso é trabalho futuro se o esquecimento virar
 problema real.
 
+## Fila do catálogo não adquirido com contagem (2026-10-14)
+
+- `personagens_nao_adquiridos_sem_classe(limite, apenas_falhas=False)` agora filtra `classe_falhou`, igual a `personagens_possuidos_sem_classe`. Sem o filtro, as falhas (`marcar_falha_classificacao`) voltavam no topo de toda rodada, porque a fila é ordenada por `id`.
+- `contar_personagens_nao_adquiridos_sem_classe(apenas_falhas=False)` dá o total da fila; o painel admin do ERIS mostra esse número e pede a quantidade a processar (antes era fixa em 100 e o restante aparecia como "?").
+- Transferência em massa para o dono: `scripts/transferir_tudo_para_dono_2026-10-14.py <id>` usa `transferir_personagem` linha a linha, então Afinidade segue a mesma regra da troca.
+
 ## Pendências
 
 - UI (`paineis.py`/`consulta.py`/`economia.py`) continua misturada com

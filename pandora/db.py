@@ -1690,16 +1690,32 @@ def contar_personagens_possuidos_sem_classe(apenas_falhas=False):
     return linha["total"]
 
 
-def personagens_nao_adquiridos_sem_classe(limite=100):
-    """Fila global do catálogo sem classe e sem qualquer propriedade."""
+_FILTRO_NAO_ADQUIRIDOS_SEM_CLASSE = (
+    "FROM colecao_personagens p WHERE p.ativo = 1 AND p.classe IS NULL AND p.classe_falhou = ? AND NOT EXISTS "
+    "(SELECT 1 FROM colecao_propriedade c WHERE c.personagem_id = p.id)"
+)
+
+
+def personagens_nao_adquiridos_sem_classe(limite=100, apenas_falhas=False):
+    """Fila global do catálogo sem classe e sem qualquer propriedade. Quem
+    já falhou (`marcar_falha_classificacao`) sai da fila padrão, igual a
+    `personagens_possuidos_sem_classe` (2026-10-14: antes as mesmas
+    falhas voltavam no topo de toda rodada)."""
     with conexao() as conn:
         linhas = conn.execute(
-            "SELECT p.id, p.nome, p.serie, p.genero, p.descricao FROM colecao_personagens p "
-            "WHERE p.ativo = 1 AND p.classe IS NULL AND NOT EXISTS "
-            "(SELECT 1 FROM colecao_propriedade c WHERE c.personagem_id = p.id) ORDER BY p.id LIMIT ?",
-            (limite,),
+            f"SELECT p.id, p.nome, p.serie, p.genero, p.descricao {_FILTRO_NAO_ADQUIRIDOS_SEM_CLASSE} ORDER BY p.id LIMIT ?",
+            (1 if apenas_falhas else 0, limite),
         ).fetchall()
     return [dict(r) for r in linhas]
+
+
+def contar_personagens_nao_adquiridos_sem_classe(apenas_falhas=False):
+    with conexao() as conn:
+        linha = conn.execute(
+            f"SELECT COUNT(*) AS total {_FILTRO_NAO_ADQUIRIDOS_SEM_CLASSE}",
+            (1 if apenas_falhas else 0,),
+        ).fetchone()
+    return linha["total"]
 
 
 def marcar_falha_classificacao(personagem_id):
