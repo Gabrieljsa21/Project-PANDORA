@@ -50,8 +50,10 @@ fica pra depois, nunca vira um "ritual de fechamento" separado:
   de forma genérica demais e deixar de fora detalhe real da interação
   (paginação de 25 em 25 por limite do Discord, ordenação por CP antes de
   cortar a lista, 2 passos onde parecia 1 só).
-- **`CHANGELOG.md`** (raiz) - resumo de alto nível sob `[Unreleased]`,
-  separado em blocos `### Corrigido (data, tema)`/`### Alterado (data,
+- **`CHANGELOG.md`** (raiz) - resumo de alto nível já sob a versão nova
+  da PR (`## [X.Y.Z] - data`, PATCH se só corrige, MINOR se traz
+  funcionalidade; nunca acumulado em `[Unreleased]`, versão do
+  `pyproject.toml` junto e tag `vX.Y.Z` depois do merge), separado em blocos `### Corrigido (data, tema)`/`### Alterado (data,
   tema)`/`### Adicionado (data, tema)` por leva de mudança relacionada (não
   por commit individual) - cita a frase exata do usuário entre aspas quando
   o pedido partiu dele.
