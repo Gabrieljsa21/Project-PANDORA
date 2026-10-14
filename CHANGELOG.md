@@ -7,6 +7,11 @@ Histórico de alto nível do que muda no PANDORA, por versão. Ver
 
 ## [Unreleased]
 
+### Alterado (2026-10-14, fila do catálogo e transferência)
+
+- **Fila do catálogo não adquirido conta o que resta e tira as falhas** (2026-10-14): **"valida pq ao \"Validar não adquiridas\" da esse ? em vez de informar a quantidade"** - `db.contar_personagens_nao_adquiridos_sem_classe` (novo) dá o total da fila, e `personagens_nao_adquiridos_sem_classe` ganhou `apenas_falhas`: quem falhou sai da fila padrão (antes as mesmas falhas voltavam no topo de toda rodada).
+- **Todas as personagens adquiridas transferidas para a conta do dono** (2026-10-14): **"transfere todos os personagens ja adquiridos para a minha conta"** - `scripts/transferir_tudo_para_dono_2026-10-14.py` moveu 1.258 personagens de duas contas pelo mesmo caminho da troca (`db.transferir_personagem`), com backup antes. Log em `scripts/logs/`.
+
 ### Corrigido
 
 - **XP da Torre elevado para 5% da produção horária da Cidade** (2026-09-12): o valor-base subiu de `10 × andar` para `30 × andar`, mantendo bônus de loot e checkpoints de 50 andares. No andar 528 com +159,4% de loot, uma vitória passa de 13,7K para 41,1K XP — cerca de três minutos de Cultura, em vez de um.
