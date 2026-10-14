@@ -164,6 +164,11 @@ CREATE TABLE IF NOT EXISTS colecao_propriedade (
 
 CREATE INDEX IF NOT EXISTS idx_colecao_propriedade_dono ON colecao_propriedade (guild_id, dono_id);
 
+-- Busca por personagem em qualquer servidor (fila do catálogo não adquirido,
+-- `NOT EXISTS ... WHERE c.personagem_id = p.id`): sem este índice a PK
+-- (guild_id, personagem_id) não serve e a contagem levava 16s (2026-10-14).
+CREATE INDEX IF NOT EXISTS idx_colecao_propriedade_personagem ON colecao_propriedade (personagem_id);
+
 CREATE TABLE IF NOT EXISTS colecao_wishlist (
     guild_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
