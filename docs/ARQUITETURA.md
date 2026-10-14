@@ -2478,6 +2478,10 @@ problema real.
 - `contar_personagens_nao_adquiridos_sem_classe(apenas_falhas=False)` dá o total da fila; o painel admin do ERIS mostra esse número e pede a quantidade a processar (antes era fixa em 100 e o restante aparecia como "?").
 - Transferência em massa para o dono: `scripts/transferir_tudo_para_dono_2026-10-14.py <id>` usa `transferir_personagem` linha a linha, então Afinidade segue a mesma regra da troca.
 
+## Índice de propriedade por personagem (2026-10-14)
+
+- `idx_colecao_propriedade_personagem` em `colecao_propriedade (personagem_id)`. A PK começa por `guild_id`, então consultas que procuram dono de uma personagem em qualquer servidor faziam varredura completa. A contagem da fila do catálogo não adquirido (`contar_personagens_nao_adquiridos_sem_classe`) levava 16s e estourava os 3s que o Discord dá para abrir o formulário de validação.
+
 ## Pendências
 
 - UI (`paineis.py`/`consulta.py`/`economia.py`) continua misturada com

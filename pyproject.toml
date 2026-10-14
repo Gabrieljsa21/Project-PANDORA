@@ -1,6 +1,6 @@
 [project]
 name = "pandora"
-version = "0.1.0"
+version = "0.2.0"
 description = "Colecionador de Personagens (gacha estilo Mudae) extraído do Project-ERIS - biblioteca Python, sem processo/HTTP próprio, importada direto por quem tem a conexão Discord (import local por path, não satélite)."
 requires-python = ">=3.11"
 dependencies = [

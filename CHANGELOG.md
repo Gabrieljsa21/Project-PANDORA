@@ -7,6 +7,18 @@ Histórico de alto nível do que muda no PANDORA, por versão. Ver
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-14
+
+Primeira versão: reúne todo o histórico registrado até aqui. A partir dela, cada PR já sai com a própria versão.
+
+## [0.2.0] - 2026-10-14
+
+Fecha numa versão tudo o que estava acumulado sob `[Unreleased]` desde a 0.1.0.
+
+### Corrigido (2026-10-14, "GAIA não respondeu a tempo" no Validar não adquiridas)
+
+- **Índice em `colecao_propriedade (personagem_id)`** (2026-10-14): **"o validar nao adquirida retorna GAIA não respondeu a tempo"** - a contagem da fila do catálogo levava 16s (a subconsulta `NOT EXISTS` percorria a tabela de donos inteira para cada personagem), e o Discord só espera 3s para o bot abrir o formulário. Com o índice, a contagem cai para milissegundos.
+
 ### Alterado (2026-10-14, fila do catálogo e transferência)
 
 - **Fila do catálogo não adquirido conta o que resta e tira as falhas** (2026-10-14): **"valida pq ao \"Validar não adquiridas\" da esse ? em vez de informar a quantidade"** - `db.contar_personagens_nao_adquiridos_sem_classe` (novo) dá o total da fila, e `personagens_nao_adquiridos_sem_classe` ganhou `apenas_falhas`: quem falhou sai da fila padrão (antes as mesmas falhas voltavam no topo de toda rodada).
