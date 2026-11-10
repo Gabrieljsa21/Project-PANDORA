@@ -38,3 +38,4 @@ select = ["E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # Reexportação proposital: `from pandora import db; db.<nome>`.
 "pandora/db/__init__.py" = ["F401"]
+"pandora/paineis/__init__.py" = ["F401"]
