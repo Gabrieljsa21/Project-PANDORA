@@ -28,10 +28,11 @@ TAXA_WISHARDS_POR_CP_HORA).
 
 Uso: python reclassificar_funcao_cidade_2026-09-01.py <caminho_do_banco>
 """
+import os
 import sqlite3
 import sys
 
-CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else r"C:\Workspace\Project-PANDORA\data\pandora.db"
+CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 RECLASSIFICACOES = {
     "Alquimista": "Saúde",

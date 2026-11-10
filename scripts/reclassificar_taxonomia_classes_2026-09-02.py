@@ -35,9 +35,10 @@ DIRETO de `colecao_personagens.classe` a cada chamada, nunca guardado num
 snapshot por jogador; o bônus de CP da Cidade (Militar/Arcano) É um
 snapshot, mas já é aceito que ele demora até a próxima ação (Party/Upar
 Nível/etc) pra atualizar, mesmo comportamento de sempre."""
+import os
 import sqlite3
 
-CAMINHO_BANCO = "data/pandora.db"
+CAMINHO_BANCO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 # --- 1) Merge de duplicatas -------------------------------------------
 MERGES = {

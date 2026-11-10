@@ -16,8 +16,3 @@ def testar_fluxo_filtra_areas_no_teto():
     assert "areas_disponiveis" in codigo
     assert "niveis.get(area, 0) < teto" in codigo
     assert "for area in areas_disponiveis" in codigo
-
-
-if __name__ == "__main__":
-    testar_fluxo_filtra_areas_no_teto()
-    print("PASS: Upar Construção esconde áreas no teto atual")

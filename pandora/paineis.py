@@ -32,6 +32,8 @@ from discord.ext import tasks
 
 from pandora import db
 from pandora import batalha, cidade, conquistas, consulta, economia, gacha, itens, personagens_favoritas, series_favoritas, torre, worldboss
+from pandora.registro import log
+from pandora.ui_base import ModalPandora, ViewPandora
 
 _COR_HUB = discord.Color(0xF1C40F)
 
@@ -81,7 +83,7 @@ def montar_embed_hub(guild, membro):
     return embed
 
 
-class ViewHubWaifu(discord.ui.View):
+class ViewHubWaifu(ViewPandora):
     """Painel-raiz de `/pandora` - restrito a quem abriu (`autor_id`), mesmo
     espírito de um menu pessoal (o LA também trata painéis de coleção como
     algo individual). `timeout=300` - tempo de sobra pra navegar sem
@@ -215,7 +217,7 @@ class ViewHubWaifu(discord.ui.View):
     async def _trocar(self, interaction: discord.Interaction):
         """Peça mais arriscada da leva (ver plano) - "propor" vira 2
         passos: `discord.ui.UserSelect` (escolher o alvo, nativo do
-        Discord) + `discord.ui.Modal` (termos da troca), em vez dos
+        Discord) + `ModalPandora` (termos da troca), em vez dos
         parâmetros de texto de `/trocar propor`. Aceitar/Recusar (`ViewTroca`)
         não muda nada - já era botão."""
         if not await self._somente_autor(interaction):
@@ -487,6 +489,14 @@ class ViewHubWaifu(discord.ui.View):
 # `pandora.series_favoritas`, aqui só embed+View.
 # ==========================================================================
 
+async def abrir_fusao(interaction: discord.Interaction):
+    """Entrada pública da Fusão pra quem está fora do hub (o comando
+    `/merge` do bot): abre o MESMO painel do botão "🧬 Fusão", em vez de
+    repetir o fluxo de 2 etapas por parâmetro de comando."""
+    view = ViewHubWaifu(interaction.guild.id, interaction.user.id)
+    await view._abrir_merge(interaction)
+
+
 def _fmt_pct(numerador, denominador):
     if denominador <= 0:
         return f"{numerador}/0"
@@ -610,7 +620,7 @@ async def _enviar_series_favoritas(interaction: discord.Interaction, guild_id, a
     await interaction.followup.send(view.formatar(), embed=embed, view=view, ephemeral=True)
 
 
-class _ViewPerfil(discord.ui.View):
+class _ViewPerfil(ViewPandora):
     """Botões do "📖 Perfil" (2026-09-02, pedido do usuário: "Mover
     Auto-claim, Ranking, Conquistas para dentro do perfil", depois "quero
     q tenha uma lista com meus personagens favoritos... e poe ela e a
@@ -777,14 +787,14 @@ async def _definir_serie_e_atualizar(view_series, slot, serie, interacao_editar_
     confirmou de fato (`interacao_responder` - pode ser uma interação
     DIFERENTE da que edita o painel, ver `_ViewEscolherSerieFavorita`)."""
     ok, mensagem = await asyncio.to_thread(series_favoritas.definir, view_series.guild_id, view_series.user_id, slot, serie)
-    print(f" [SERIES] series_favoritas.definir -> ok={ok} mensagem={mensagem}")
+    log.debug(f" [SERIES] series_favoritas.definir -> ok={ok} mensagem={mensagem}")
     if ok:
         await view_series._atualizar()
         await interacao_editar_painel.edit_original_response(content=view_series.formatar(), view=view_series)
     await interacao_responder.followup.send(mensagem, ephemeral=True)
 
 
-class _ViewEscolherSerieFavorita(discord.ui.View):
+class _ViewEscolherSerieFavorita(ViewPandora):
     """Passo de desambiguação (2026-09-02, achado do usuário: "essa
     resposta q recebi nem faz sentido... n tem algo p confirmar, é so uma
     mensagem, se eu escrever sim vai reconhecer?", refinado depois: "a
@@ -830,7 +840,7 @@ class _ViewEscolherSerieFavorita(discord.ui.View):
         await _definir_serie_e_atualizar(self._view_series, self._slot, serie, self._interacao_modal, interaction)
 
 
-class _ModalDefinirSerieFavorita(discord.ui.Modal):
+class _ModalDefinirSerieFavorita(ModalPandora):
     def __init__(self, view, slot, serie_atual):
         super().__init__(title=f"Série Favorita - Slot {slot}"[:45])
         self._view = view
@@ -852,10 +862,10 @@ class _ModalDefinirSerieFavorita(discord.ui.Modal):
         # Interação de Modal aberto por um botão vira `deferred_message_
         # update` (edita a MESMA mensagem do painel) - `edit_original_
         # response` no lugar de `response.edit_message` depois do defer.
-        print(f" [SERIES] Modal on_submit iniciado - slot={self._slot} user={interaction.user.id}")
+        log.debug(f" [SERIES] Modal on_submit iniciado - slot={self._slot} user={interaction.user.id}")
         try:
             await interaction.response.defer()
-            print(" [SERIES] defer() OK")
+            log.debug(" [SERIES] defer() OK")
             texto = str(self.serie).strip() or None
             if texto is not None:
                 # 🔥 Resolução ANTES de gravar (2026-09-02, pedido do
@@ -873,7 +883,7 @@ class _ModalDefinirSerieFavorita(discord.ui.Modal):
                 canonico = await asyncio.to_thread(db.encontrar_serie_por_nome, texto)
                 if canonico is None:
                     candidatas = await asyncio.to_thread(db.series_do_catalogo, texto, 25)
-                    print(f" [SERIES] busca por substring '{texto}' -> {len(candidatas)} candidata(s)")
+                    log.debug(f" [SERIES] busca por substring '{texto}' -> {len(candidatas)} candidata(s)")
                     if not candidatas:
                         await interaction.followup.send(f'Nenhuma série parecida com "{texto}" no catálogo.', ephemeral=True)
                         return
@@ -885,13 +895,13 @@ class _ModalDefinirSerieFavorita(discord.ui.Modal):
                     return
                 texto = canonico
             await _definir_serie_e_atualizar(self._view, self._slot, texto, interaction, interaction)
-            print(" [SERIES] Modal on_submit concluído.")
+            log.debug(" [SERIES] Modal on_submit concluído.")
         except Exception:
-            print(" [SERIES] !!! EXCEÇÃO dentro de on_submit !!!")
+            log.warning(" [SERIES] !!! EXCEÇÃO dentro de on_submit !!!")
             traceback.print_exc()
 
 
-class _ViewSeriesFavoritas(discord.ui.View):
+class _ViewSeriesFavoritas(ViewPandora):
     """Gerenciar Séries Favoritas (2026-09-02) - 1 botão por slot
     (verde = ocupado, cinza = vazio), abre `_ModalDefinirSerieFavorita`
     pra escolher/trocar/limpar; + 1 botão "Comprar Slot" quando ainda não
@@ -994,42 +1004,42 @@ class _ViewSeriesFavoritas(discord.ui.View):
     async def _callback_slot_select(self, interaction: discord.Interaction):
         slot = int(interaction.data["values"][0])
         item = next(i for i in self._slots if i["slot"] == slot)
-        print(f" [SERIES] selecionou o slot {slot} - user={interaction.user.id} self.user_id={self.user_id}")
+        log.debug(f" [SERIES] selecionou o slot {slot} - user={interaction.user.id} self.user_id={self.user_id}")
         try:
             if str(interaction.user.id) != self.user_id:
-                print(" [SERIES] bloqueado - painel não é do autor.")
+                log.debug(" [SERIES] bloqueado - painel não é do autor.")
                 await interaction.response.send_message("Esse painel não é seu.", ephemeral=True)
                 return
             await interaction.response.send_modal(_ModalDefinirSerieFavorita(self, item["slot"], item["serie"]))
-            print(" [SERIES] send_modal OK")
+            log.debug(" [SERIES] send_modal OK")
         except Exception:
-            print(" [SERIES] !!! EXCEÇÃO dentro do clique de slot !!!")
+            log.warning(" [SERIES] !!! EXCEÇÃO dentro do clique de slot !!!")
             traceback.print_exc()
 
     async def _comprar_slot(self, interaction: discord.Interaction):
-        print(f" [SERIES] Comprar Slot clicado - user={interaction.user.id} self.user_id={self.user_id}")
+        log.debug(f" [SERIES] Comprar Slot clicado - user={interaction.user.id} self.user_id={self.user_id}")
         try:
             if str(interaction.user.id) != self.user_id:
-                print(" [SERIES] bloqueado - painel não é do autor.")
+                log.debug(" [SERIES] bloqueado - painel não é do autor.")
                 await interaction.response.send_message("Esse painel não é seu.", ephemeral=True)
                 return
             # 🔥 `defer()` ANTES do `to_thread` (2026-09-02) - `_atualizar`
             # chama `series_favoritas.listar`, documentado como CARO (varre
             # a coleção inteira filtrada por série).
             await interaction.response.defer()
-            print(" [SERIES] defer() OK")
+            log.debug(" [SERIES] defer() OK")
             ok, mensagem = await asyncio.to_thread(db.comprar_slot_serie_favorita, self.guild_id, interaction.user.id)
-            print(f" [SERIES] comprar_slot_serie_favorita -> ok={ok} mensagem={mensagem}")
+            log.debug(f" [SERIES] comprar_slot_serie_favorita -> ok={ok} mensagem={mensagem}")
             if not ok:
                 await interaction.followup.send(mensagem, ephemeral=True)
                 return
             await self._atualizar()
-            print(" [SERIES] _atualizar concluído, editando resposta original...")
+            log.debug(" [SERIES] _atualizar concluído, editando resposta original...")
             await interaction.edit_original_response(content=self.formatar(), view=self)
             await interaction.followup.send(mensagem, ephemeral=True)
-            print(" [SERIES] Comprar Slot concluído.")
+            log.debug(" [SERIES] Comprar Slot concluído.")
         except Exception:
-            print(" [SERIES] !!! EXCEÇÃO dentro de Comprar Slot !!!")
+            log.warning(" [SERIES] !!! EXCEÇÃO dentro de Comprar Slot !!!")
             traceback.print_exc()
 
     def formatar(self):
@@ -1043,7 +1053,7 @@ class _ViewSeriesFavoritas(discord.ui.View):
         return "\n".join(linhas)
 
 
-class _ModalBuscarPosicaoOuNomeSerie(discord.ui.Modal, title="Buscar personagem"):
+class _ModalBuscarPosicaoOuNomeSerie(ModalPandora, title="Buscar personagem"):
     """"🔎 Buscar" do navegador de Série (2026-09-03, pedido do usuário:
     "Faz o msm esquemas das personagens" - mesmo Modal de posição/nome de
     `_ModalBuscarPosicaoOuNome`, só que resolvendo posição DENTRO da
@@ -1086,7 +1096,7 @@ class _ModalBuscarPosicaoOuNomeSerie(discord.ui.Modal, title="Buscar personagem"
         await interaction.edit_original_response(embed=self._view.montar_embed(), view=self._view)
 
 
-class _ViewNavegarSerie(discord.ui.View):
+class _ViewNavegarSerie(ViewPandora):
     """Navegador de uma Série Favorita (2026-09-03, pedido do usuário:
     "quero colocar um dropdown na tela de series, com a lista de series q
     favoritei. E qnd seleciono uma serie, ele abre os personagens, igual
@@ -1449,7 +1459,7 @@ class _ViewNavegarSerie(discord.ui.View):
 # SLOT, não à personagem - ver `pandora.personagens_favoritas` pro núcleo.
 # ==========================================================================
 
-class _ViewPersonagensFavoritas(discord.ui.View):
+class _ViewPersonagensFavoritas(ViewPandora):
     """Gerenciar Personagens Favoritas - navegador com setas ◀️/▶️ entre os
     slots (2026-09-06, pedido do usuário: "quero q na propria tela de
     waifus... seja como a tela de personagens, q tem as setas p ver as
@@ -1790,7 +1800,7 @@ class _ViewPersonagensFavoritas(discord.ui.View):
         await interaction.followup.send(mensagem, ephemeral=True)
 
 
-class _ViewConfirmarComprarTudo(discord.ui.View):
+class _ViewConfirmarComprarTudo(ViewPandora):
     """Confirmação de "🛍️ Comprar Tudo" (2026-09-03, pedido do usuário:
     "qnd clico ele abre uma nova mensagem com o preço de tudo e o botão
     de confirmar") - mensagem NOVA e separada do card de navegação, com o
@@ -1864,7 +1874,7 @@ class _ViewConfirmarComprarTudo(discord.ui.View):
         await interaction.response.edit_message(content="Cancelado.", view=None)
 
 
-class _ViewEscolherMergeAlvo(discord.ui.View):
+class _ViewEscolherMergeAlvo(ViewPandora):
     """2º passo do Merge (2026-09-02, pedido do usuário: "5 da msm raridade
     por 1 da msm raridade disponivel, a escolha") - até 25 personagens
     LIVRES (`db.personagens_livres_por_raridade`, mesma fonte que a Loja
@@ -1915,7 +1925,7 @@ class _ViewEscolherMergeAlvo(discord.ui.View):
         await interaction.response.edit_message(content=mensagem, view=None)
 
 
-class _ViewEscolherRanking(discord.ui.View):
+class _ViewEscolherRanking(ViewPandora):
     """Seletor de métrica pro `/ranking` (2026-09-02, "rankings expandidos"
     - Seção 25 do plano original) - Coleção/Soulmates/Torre, cada uma 1
     query barata de 1 tabela só (`db.ranking_guild`)."""
@@ -2006,7 +2016,7 @@ def _descricao_personagem_livre_dropdown(personagem):
     return texto[:100], torre.icone_categoria(torre.categoria_personagem(personagem))
 
 
-class _ViewSelecionarPersonagem(discord.ui.View):
+class _ViewSelecionarPersonagem(ViewPandora):
     """Select genérico de até 25 personagens (teto do Discord) - usado
     pelo botão "Merge" do hub e pela Party. `ao_selecionar
     (interaction, lista_de_personagens)` recebe SEMPRE uma lista (1 item
@@ -2038,7 +2048,7 @@ class _ViewSelecionarPersonagem(discord.ui.View):
         await self._ao_selecionar(interaction, [self._personagens[i] for i in indices])
 
 
-class _ViewConfirmar(discord.ui.View):
+class _ViewConfirmar(ViewPandora):
     """Sim/Não genérico - `ao_confirmar(interaction)` só roda no "Sim".
     `ao_cancelar` (opcional) roda no "Não" em vez do padrão (apagar a
     mensagem) - usado quando cancelar deve VOLTAR pra uma tela anterior
@@ -2068,7 +2078,7 @@ class _ViewConfirmar(discord.ui.View):
 _TETO_OPCOES_DROPDOWN_LOJA = 25
 
 
-class _ViewEscolherAlvo(discord.ui.View):
+class _ViewEscolherAlvo(ViewPandora):
     """Select de "até qual nível/Afinidade ir", pulando degraus (2026-08-30,
     pedido do usuário: "o botao de upar nivel e afinidade tem de ser um
     dropdown, p permitir pular ate o maximo. A pessoa escolhe o nivel
@@ -2184,7 +2194,7 @@ class _ViewEscolherAlvo(discord.ui.View):
         await self._ao_cancelar(interaction)
 
 
-class _ModalBuscarPersonagem(discord.ui.Modal):
+class _ModalBuscarPersonagem(ModalPandora):
     """Busca por nome ANTES do select (2026-08-30, pedido do usuário: "ja
     tenho mais de 50 personagens, e discord so lista 25... msm eu n
     acertando nome, traz os mais proximos") - filtra a coleção INTEIRA
@@ -2230,7 +2240,7 @@ class _ModalBuscarPersonagem(discord.ui.Modal):
         await interaction.response.edit_message(content="Selecione:", view=view)
 
 
-class _ModalBuscarCatalogoWishlist(discord.ui.Modal):
+class _ModalBuscarCatalogoWishlist(ModalPandora):
     """Busca no catálogo para preencher um slot de Wishlist, possuída ou não."""
 
     nome = discord.ui.TextInput(label="Nome da personagem", placeholder="Ex.: Megumin", max_length=100)
@@ -2252,7 +2262,7 @@ class _ModalBuscarCatalogoWishlist(discord.ui.Modal):
         await interaction.response.edit_message(content="Selecione:", view=view)
 
 
-class _ModalBuscarPosicaoOuNome(discord.ui.Modal, title="Buscar personagem"):
+class _ModalBuscarPosicaoOuNome(ModalPandora, title="Buscar personagem"):
     """"🔎 Buscar" do card "🔍 Personagem" (2026-09-02, pedido do usuário:
     "adicione um botão 🔎 Buscar que abra um modal do Discord permitindo
     informar o nome da personagem ou uma posição específica: digitando
@@ -2412,7 +2422,7 @@ def _embed_detalhes_cp_personagem(personagem, guild_id, user_id):
     return embed
 
 
-class _ViewNivel(discord.ui.View):
+class _ViewNivel(ViewPandora):
     """Card completo (`consulta.embed_carta_personagem`) + upar Nível +
     upar Afinidade + Divorciar + Favoritar (2026-08-30) - usado pelo
     "🔍 Personagem" do hub, ÚNICO jeito de ver/gerenciar uma personagem
@@ -2946,7 +2956,7 @@ def _fluxo_progressao_cidade(guild_id, autor_id):
     return callback
 
 
-class ViewCidadeHub(discord.ui.View):
+class ViewCidadeHub(ViewPandora):
     """Painel "🏙️ Cidade" (2026-09-06, pedido do usuário: "Coloca a opção
     comprar e usar Upgrade de Construção no painel da cidade") - o Nível de
     Construção de cada área já aparece neste card (`Lv{nivel}` no título de
@@ -3259,7 +3269,7 @@ def _resumo_subir_max(resumo):
     return texto
 
 
-class _ViewTorre(discord.ui.View):
+class _ViewTorre(ViewPandora):
     """Tela da Torre (2026-08-30) - botão "Subir" sem confirmação extra (a
     resolução é determinística e SEM CUSTO de tentar - perder não consome
     nada, então não existe risco real a confirmar, diferente da Prova de
@@ -3392,7 +3402,7 @@ class ViewColecaoHub(consulta.ViewColecao):
         """A parte PESADA de `_dados_do_modo` (modo "minha") - separada
         pra poder rodar via `asyncio.to_thread` de fora (2026-08-30,
         achado do usuário: "GAIA não respondeu a tempo" no Cidade/
-        Personagem, mesma causa aqui) - `__init__` de uma `discord.ui.View`
+        Personagem, mesma causa aqui) - `__init__` de uma `ViewPandora`
         é síncrono, não dá pra `await` lá dentro, então quem CONSTRÓI a
         View (`_colecao`/`_trocar_modo`, ambos `async`) pré-calcula isso
         ANTES e passa pronto."""
@@ -3476,7 +3486,7 @@ class ViewColecaoHub(consulta.ViewColecao):
         await interaction.response.send_message("Escolha quem reivindicar:", view=view)
 
 
-class ViewWishlistHub(discord.ui.View):
+class ViewWishlistHub(ViewPandora):
     """Navegador de Wishlist (2026-09-03, pedido do usuário: "A wishlist
     tem q ser igual a tela de personagem, mostrando imagem e com os msm
     botoes") - MESMO card (`consulta.embed_carta_personagem`) + navegação
@@ -3806,7 +3816,7 @@ class ViewWishlistHub(discord.ui.View):
         await interaction.edit_original_response(embed=self.montar_embed(), view=self)
 
 
-class _ModalBuscarPosicaoOuNomeWishlist(discord.ui.Modal, title="Buscar personagem"):
+class _ModalBuscarPosicaoOuNomeWishlist(ModalPandora, title="Buscar personagem"):
     """"🔎 Buscar" da Wishlist (2026-09-03) - mesmo Modal de posição/nome
     de `_ModalBuscarPosicaoOuNomeSerie`, resolvendo posição dentro da
     Wishlist do jogador em vez do catálogo de uma série."""
@@ -3846,7 +3856,7 @@ class _ModalBuscarPosicaoOuNomeWishlist(discord.ui.Modal, title="Buscar personag
         await interaction.edit_original_response(embed=self._view.montar_embed(), view=self._view)
 
 
-class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar aos Favoritos/Wishlist"):
+class _ModalAdicionarWishlist(ModalPandora, title="Adicionar aos Favoritos/Wishlist"):
     """Campo único MULTI-LINHA (2026-09-01, pedido original da Wishlist:
     "alterar forma de adicionar wishlist por uma mais fácil e rápido p
     incluir mais de 1") - 1 nome por linha, processa todos numa submissão
@@ -3910,7 +3920,7 @@ class _ModalAdicionarWishlist(discord.ui.Modal, title="Adicionar aos Favoritos/W
         await interaction.response.edit_message(content=None, embed=self._view_wishlist.montar_embed(), view=self._view_wishlist)
 
 
-class _ViewFiltrarCategoria(discord.ui.View):
+class _ViewFiltrarCategoria(ViewPandora):
     """Filtro de categoria de combate (2026-08-30, pedido do usuário: "na
     hora de adicionar, deixa selecionar a role p filtrar e ficar facil de
     preencher oq precisa") - passo extra só no fluxo de ADICIONAR da Party
@@ -3937,7 +3947,7 @@ class _ViewFiltrarCategoria(discord.ui.View):
         await self._ao_filtrar(interaction, None if valor == "todas" else valor)
 
 
-class ViewEquipe(discord.ui.View):
+class ViewEquipe(ViewPandora):
     """Painel de Party (2026-08-29) - SEM `/party` nem `/pandora party`, só
     alcançável pelo botão 👥 Party do hub (mesmo modelo do `Grupos` do LA -
     zero comando raiz). `tipo` fixo em "party" - a Vitrine (que reaproveitava
@@ -4253,7 +4263,7 @@ def _fluxo_usar_upgrade_construcao(guild_id, autor_id):
             await interacao_sel.response.edit_message(content=f"Escolha até qual Nível subir {area}:", view=view_alvo)
 
         select.callback = _callback_select
-        view_select = discord.ui.View(timeout=900)
+        view_select = ViewPandora(timeout=900)
         view_select.add_item(select)
         await interaction.response.send_message("Escolha onde aplicar o Upgrade de Construção:", view=view_select, ephemeral=True)
     return _callback
@@ -4315,13 +4325,13 @@ def _fluxo_upar_construcao_direto(guild_id, autor_id):
             await interacao_sel.response.edit_message(content=f"Escolha até qual Nível subir {area}:", view=view_alvo)
 
         select.callback = _callback_select
-        view_select = discord.ui.View(timeout=900)
+        view_select = ViewPandora(timeout=900)
         view_select.add_item(select)
         await interaction.response.send_message("Escolha onde upar - o preço é o mesmo pra todas as áreas, por faixa de 10 níveis:", view=view_select, ephemeral=True)
     return _callback
 
 
-class ViewLoja(discord.ui.View):
+class ViewLoja(ViewPandora):
     """Painel da Loja (2026-08-29) - `/loja` deixa de existir como comando
     NESTA leva; alcançável só pelo botão 🛒 do hub. 3 ações de sempre
     (`/loja ver+comprar`, `/loja garantir`, `/loja upgrade`), cada uma
@@ -4491,7 +4501,7 @@ class ViewLoja(discord.ui.View):
         await interaction.response.send_message("Escolha até qual Nível de Maestria da Coleção ir:", view=view, ephemeral=True)
 
 
-class _ViewEscolherRaridadeLoja(discord.ui.View):
+class _ViewEscolherRaridadeLoja(ViewPandora):
     """Select de raridade compartilhado por "Comprar" (1-5⭐) e "Garantir"
     (3-5⭐, mesmo teto de `db.PRECOS_GARANTIA`)."""
 
@@ -4523,10 +4533,9 @@ class _ViewEscolherRaridadeLoja(discord.ui.View):
         preco = db.PRECOS_GARANTIA[raridade]
 
         async def _confirmar(interacao_confirmacao: discord.Interaction):
-            if db.saldo_wishards(self._view_loja.guild_id, interacao_confirmacao.user.id) < preco:
+            if db.debitar_wishards(self._view_loja.guild_id, interacao_confirmacao.user.id, preco, "loja_garantia", f"garantia {raridade}estrelas") is None:
                 await interacao_confirmacao.response.edit_message(content=f"Custa {_fmt_numero(preco)} WiShards e você não tem o suficiente.", view=None)
                 return
-            db.creditar_wishards(self._view_loja.guild_id, interacao_confirmacao.user.id, -preco, "loja_garantia", f"garantia {raridade}estrelas")
             db.definir_garantia(self._view_loja.guild_id, interacao_confirmacao.user.id, raridade)
             await interacao_confirmacao.response.edit_message(
                 content=f"Garantido: seu próximo roll vai ser {raridade}⭐ ou mais (custou {_fmt_numero(preco)} WiShards).", view=None,
@@ -4536,7 +4545,7 @@ class _ViewEscolherRaridadeLoja(discord.ui.View):
         await interaction.response.edit_message(content=f"Garantir {raridade}⭐ custa {_fmt_numero(preco)} WiShards - confirma?", view=view)
 
 
-class _ModalBuscarNomeLoja(discord.ui.Modal, title="Comprar personagem"):
+class _ModalBuscarNomeLoja(ModalPandora, title="Comprar personagem"):
     """Busca por nome ANTES da lista da Loja (2026-09-03, pedido do
     usuário: "Coloca para o comprar deixar escrever parte do nome tbm,
     assim como foi na serie") - a Loja só mostrava uma AMOSTRA ALEATÓRIA
@@ -4575,7 +4584,7 @@ class _ModalBuscarNomeLoja(discord.ui.Modal, title="Comprar personagem"):
         await interaction.edit_original_response(content=economia.formatar_loja(self._raridade, personagens), view=view)
 
 
-class _ViewComprarPersonagem(discord.ui.View):
+class _ViewComprarPersonagem(ViewPandora):
     """Select final de "Comprar" - até 25 personagens livres dessa
     raridade (mesmo teto do Discord), `db.comprar_personagem` decide tudo
     (preço, corrida por quem paga primeiro, reembolso se perder).
@@ -4657,7 +4666,7 @@ def _int_seguro(texto):
     return -int(corpo) if negativo else int(corpo)
 
 
-class _ViewEscolherAlvoTroca(discord.ui.View):
+class _ViewEscolherAlvoTroca(ViewPandora):
     """Passo 1 de "🔄 Trocas" - escolher o outro jogador via
     `discord.ui.UserSelect` (nativo do Discord, sem listar membros na
     mão); passo 2/3 são selects de personagem (oferece/pede)."""
@@ -4695,7 +4704,7 @@ class _ViewEscolherAlvoTroca(discord.ui.View):
         await interaction.response.edit_message(content=f"Trocando com {alvo.mention} - escolha o que você OFERECE:", view=view)
 
 
-class _ViewEscolherPersonagensTroca(discord.ui.View):
+class _ViewEscolherPersonagensTroca(ViewPandora):
     """Passo 2 (oferece) e 3 (pede) de "🔄 Trocas" (2026-08-29, pedido do
     usuário depois de eu ter feito isso com IDs digitados num Modal:
     "prefiro q seja um dropdown q permita escrever nome para pesquisar doq
@@ -4803,7 +4812,7 @@ def _texto_valores_troca(guild_id, proponente_id, alvo, oferece_ids, pede_ids):
     return "\n".join(linhas)
 
 
-class _ViewConfirmarValoresTroca(discord.ui.View):
+class _ViewConfirmarValoresTroca(ViewPandora):
     """Passo extra entre escolher "pede" e o Modal de WiShards - só existe
     pra dar tempo de mostrar `_texto_valores_troca` antes de abrir o Modal
     (Modal em si não tem como calcular/mostrar nada, é só texto puro)."""
@@ -4825,7 +4834,7 @@ class _ViewConfirmarValoresTroca(discord.ui.View):
         )
 
 
-class _ModalWishardsTroca(discord.ui.Modal, title="Propor troca - WiShards"):
+class _ModalWishardsTroca(ModalPandora, title="Propor troca - WiShards"):
     """Último passo - só os 2 valores em WiShards continuam sendo texto
     (número é rápido de digitar; personagem nunca é, por isso os 2 passos
     de select acima)."""
@@ -4928,7 +4937,7 @@ async def _resolver_e_revelar(interaction: discord.Interaction, desafio):
     por Desafiar/Montar Defesa/Revanche, nenhuma logava nada antes - só
     re-levanta depois de logar (não muda o comportamento de quem chama,
     só garante que a exceção fica visível no log de qualquer jeito)."""
-    print(f" [BATALHA] _resolver_e_revelar iniciado - desafio_id={desafio['id']}")
+    log.debug(f" [BATALHA] _resolver_e_revelar iniciado - desafio_id={desafio['id']}")
     try:
         ordem_a = json.loads(desafio["ordem_desafiante"])
         ordem_b = json.loads(desafio["ordem_defensor"])
@@ -4936,7 +4945,7 @@ async def _resolver_e_revelar(interaction: discord.Interaction, desafio):
             batalha.resolver_rodadas, ordem_a, ordem_b,
         )
     except Exception:
-        print(" [BATALHA] !!! EXCEÇÃO dentro de _resolver_e_revelar (resolvendo rodadas) !!!")
+        log.warning(" [BATALHA] !!! EXCEÇÃO dentro de _resolver_e_revelar (resolvendo rodadas) !!!")
         traceback.print_exc()
         raise
     personagem = db.personagem_por_id(desafio["personagem_id"])
@@ -4966,7 +4975,7 @@ async def _resolver_e_revelar(interaction: discord.Interaction, desafio):
             # usuário: "Coloca log se ta tendo dificuldade de encontrar os
             # problemas") - antes um HTTPException aqui (token expirado,
             # permissão, rate limit) desaparecia sem deixar rastro nenhum.
-            print(f" [BATALHA] edit_original_response falhou (ignorado, comportamento já era esse): {erro_http}")
+            log.warning(f" [BATALHA] edit_original_response falhou (ignorado, comportamento já era esse): {erro_http}")
         await asyncio.sleep(1.5)
 
     # 🔥 Morte Súbita REMOVIDA (2026-09-02, pedido do usuário) -
@@ -5031,13 +5040,13 @@ class SchedulerBatalha:
             try:
                 ids = await asyncio.to_thread(db.desafios_batalha_expirados, guild.id, limite)
             except Exception as e:
-                print(f" [BATALHA] SchedulerBatalha falhou ao checar desafios expirados em {guild.id}: {e}")
+                log.warning(f" [BATALHA] SchedulerBatalha falhou ao checar desafios expirados em {guild.id}: {e}")
                 continue
             for desafio_id in ids:
                 try:
                     await self._auto_resolver(desafio_id)
                 except Exception as e:
-                    print(f" [BATALHA] SchedulerBatalha falhou ao auto-resolver desafio #{desafio_id}: {e}")
+                    log.warning(f" [BATALHA] SchedulerBatalha falhou ao auto-resolver desafio #{desafio_id}: {e}")
 
     async def _auto_resolver(self, desafio_id):
         desafio = await asyncio.to_thread(db.batalha_por_id, desafio_id)
@@ -5048,11 +5057,11 @@ class SchedulerBatalha:
             batalha.montar_defesa, desafio["guild_id"], desafio_id, desafio["defensor_id"], formacao,
         )
         if not ok:
-            print(f" [BATALHA] SchedulerBatalha - montar_defesa recusou o desafio #{desafio_id}: {erro}")
+            log.warning(f" [BATALHA] SchedulerBatalha - montar_defesa recusou o desafio #{desafio_id}: {erro}")
             return
         canal = self.client.get_channel(int(desafio["canal_id"])) if desafio["canal_id"] else None
         if canal is None:
-            print(f" [BATALHA] SchedulerBatalha resolveu o desafio #{desafio_id} por timeout, mas sem canal salvo pra anunciar.")
+            log.warning(f" [BATALHA] SchedulerBatalha resolveu o desafio #{desafio_id} por timeout, mas sem canal salvo pra anunciar.")
             return
         await self._resolver_e_anunciar(canal, desafio_atualizado)
 
@@ -5073,10 +5082,10 @@ class SchedulerBatalha:
         try:
             await canal.send(embed=embed)
         except discord.HTTPException as erro_http:
-            print(f" [BATALHA] SchedulerBatalha falhou ao anunciar o desafio #{desafio['id']}: {erro_http}")
+            log.warning(f" [BATALHA] SchedulerBatalha falhou ao anunciar o desafio #{desafio['id']}: {erro_http}")
 
 
-class ViewBatalhaHub(discord.ui.View):
+class ViewBatalhaHub(ViewPandora):
     """Painel "⚔️ PvP" (era "⚔️ Batalha" - 2026-09-02, botão renomeado) -
     único jeito de desafiar/defender/ligar a Auto-Defesa. Restrito a quem
     abriu (`autor_id`) - cada jogador envolvido num desafio abre o PRÓPRIO
@@ -5200,7 +5209,7 @@ class ViewBatalhaHub(discord.ui.View):
             return
         await interaction.response.send_message("🏳️ Desafio recusado - o desafiante foi reembolsado.", ephemeral=True)
 
-class _ViewEscolherFormacaoBatalha(discord.ui.View):
+class _ViewEscolherFormacaoBatalha(ViewPandora):
     """5 seletores (1 por posição) - DPS/Tank/Support (2026-09-02, pedido
     do usuário: "em vez de eu ter q escolher os personagens q vao
     participar, deixar escolher apenas as categorias e suas posições") -
@@ -5240,7 +5249,7 @@ class _ViewEscolherFormacaoBatalha(discord.ui.View):
         return callback
 
 
-class _ViewEscolherAlvoBatalha(discord.ui.View):
+class _ViewEscolherAlvoBatalha(ViewPandora):
     """Passo 1 de "⚔️ Desafiar" - escolher o jogador-alvo via `discord.ui.
     UserSelect` (mesmo padrão de `_ViewEscolherAlvoTroca`); passo 2 é a
     busca por nome na coleção DELE (`_ModalBuscarPersonagem`, reaproveitado
@@ -5304,16 +5313,16 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
                 # a interação nem chegava aqui, travava num dos `to_thread`, ou
                 # uma exceção estava sendo engolida silenciosamente por algum
                 # handler do discord.py sem cair no log redirecionado.
-                print(f" [BATALHA] _confirmar (desafiar) iniciado - desafiante={interacao_confirmacao.user.id} alvo={alvo.id} (bot={alvo.bot}) personagem={personagem['id']}")
+                log.debug(f" [BATALHA] _confirmar (desafiar) iniciado - desafiante={interacao_confirmacao.user.id} alvo={alvo.id} (bot={alvo.bot}) personagem={personagem['id']}")
                 try:
                     await interacao_confirmacao.response.defer()
-                    print(" [BATALHA] defer() OK")
+                    log.debug(" [BATALHA] defer() OK")
                     canal_id = interacao_confirmacao.channel.id if interacao_confirmacao.channel else None
                     ok, erro, desafio_id = await asyncio.to_thread(
                         batalha.iniciar_desafio, guild_id, interacao_confirmacao.user.id, alvo.id, personagem["id"],
                         categorias_ordem, canal_id=canal_id,
                     )
-                    print(f" [BATALHA] iniciar_desafio -> ok={ok} erro={erro} desafio_id={desafio_id}")
+                    log.warning(f" [BATALHA] iniciar_desafio -> ok={ok} erro={erro} desafio_id={desafio_id}")
                     if not ok:
                         await interacao_confirmacao.edit_original_response(content=f"❌ {erro}", view=None)
                         return
@@ -5330,17 +5339,17 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
                     auto_defesa = alvo.bot or await asyncio.to_thread(db.auto_defesa_batalha_ativa, guild_id, alvo.id)
                     if auto_defesa:
                         formacao_auto = await asyncio.to_thread(batalha.defesa_automatica_para_desafio, desafio_id)
-                        print(f" [BATALHA] auto-defesa (bot={alvo.bot}) - formação: {formacao_auto}")
+                        log.debug(f" [BATALHA] auto-defesa (bot={alvo.bot}) - formação: {formacao_auto}")
                         ok_defesa, erro_defesa, desafio_atualizado = await asyncio.to_thread(
                             batalha.montar_defesa, guild_id, desafio_id, alvo.id, formacao_auto,
                         )
-                        print(f" [BATALHA] montar_defesa -> ok={ok_defesa} erro={erro_defesa}")
+                        log.warning(f" [BATALHA] montar_defesa -> ok={ok_defesa} erro={erro_defesa}")
                         if not ok_defesa:
                             await interacao_confirmacao.edit_original_response(content=f"❌ {erro_defesa}", view=None)
                             return
-                        print(" [BATALHA] entrando em _resolver_e_revelar...")
+                        log.debug(" [BATALHA] entrando em _resolver_e_revelar...")
                         await _resolver_e_revelar(interacao_confirmacao, desafio_atualizado)
-                        print(" [BATALHA] _resolver_e_revelar concluído.")
+                        log.debug(" [BATALHA] _resolver_e_revelar concluído.")
                         return
                     await interacao_confirmacao.edit_original_response(
                         content=(
@@ -5350,14 +5359,14 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
                         view=None,
                     )
                     await _anunciar_desafio(interacao_confirmacao.channel, guild_id, desafio_id, alvo.mention)
-                    print(" [BATALHA] desafio contra humano enviado com sucesso.")
+                    log.debug(" [BATALHA] desafio contra humano enviado com sucesso.")
                 except Exception:
-                    print(" [BATALHA] !!! EXCEÇÃO dentro de _confirmar (desafiar) !!!")
+                    log.warning(" [BATALHA] !!! EXCEÇÃO dentro de _confirmar (desafiar) !!!")
                     traceback.print_exc()
                     try:
                         await interacao_confirmacao.edit_original_response(content="❌ Erro interno - já registrado no log.", view=None)
                     except Exception:
-                        print(" [BATALHA] (falhou até tentar avisar o usuário do erro - ver traceback acima)")
+                        log.warning(" [BATALHA] (falhou até tentar avisar o usuário do erro - ver traceback acima)")
 
             async def _cancelar(interacao_cancelamento: discord.Interaction):
                 await interacao_cancelamento.response.edit_message(content="Desafio cancelado.", view=None)
@@ -5387,7 +5396,7 @@ class _ViewEscolherAlvoBatalha(discord.ui.View):
 # o resto deste módulo (que é sempre um painel PESSOAL).
 # ==========================================================================
 
-class _ViewWorldBossAuto(discord.ui.View):
+class _ViewWorldBossAuto(ViewPandora):
     """Preferência de Entrada Automática (Seção 8/9) - ephemeral, só quem
     abriu vê (não precisa de checagem de autor extra - já é pessoal por
     ser ephemeral)."""
@@ -5439,7 +5448,7 @@ class _ViewWorldBossAuto(discord.ui.View):
         await interaction.response.edit_message(content=self.formatar(), view=self)
 
 
-class ViewWorldBossHub(discord.ui.View):
+class ViewWorldBossHub(ViewPandora):
     """Painel "🐉 World Boss" - sempre reconstrói o estado fresco do banco
     (mesmo padrão de `ViewBatalhaHub`) - restart-safe, nenhum turno/
     inscrição depende desta View específica sobreviver (o scheduler roda
@@ -5513,7 +5522,7 @@ class ViewWorldBossHub(discord.ui.View):
 # ==========================================================================
 
 
-class ViewInventarioHub(discord.ui.View):
+class ViewInventarioHub(ViewPandora):
     """Painel "🎒 Inventário" - painel PESSOAL (restrito ao autor, ao
     contrário do World Boss). Só mostra botão de usar pra item que o
     jogador REALMENTE tem (Roll/Claim Permanente não têm botão - já se
@@ -5695,12 +5704,12 @@ class ViewInventarioHub(discord.ui.View):
             await interacao_sel.response.edit_message(content=mensagem, view=None)
 
         select.callback = _callback
-        view_select = discord.ui.View(timeout=900)
+        view_select = ViewPandora(timeout=900)
         view_select.add_item(select)
         await interaction.response.send_message("Escolha o próximo World Boss desse servidor:", view=view_select, ephemeral=True)
 
 
-class ViewConquistasHub(discord.ui.View):
+class ViewConquistasHub(ViewPandora):
     """Painel "🏆 Conquistas" - 2 famílias distintas (2026-09-01): 🐉 World
     Boss (registro puro, Seção 15 - lista só o que já foi desbloqueado) e
     📚 Colecionador (`ERIS_sistema_colecao_wishards.md` Seções 22/24, paga
@@ -5746,7 +5755,7 @@ class ViewConquistasHub(discord.ui.View):
 _ORDEM_CATEGORIAS_BONUS = ("DPS", "Tank", "Support", "Sem categoria")
 
 
-class ViewBonusClasseHub(discord.ui.View):
+class ViewBonusClasseHub(ViewPandora):
     """Painel "⚔️ Bônus por Classe" (2026-09-02, pedido do usuário: "uma
     nova tela q mostrasse q DPS ta ganhando +X Tank +Y... e n sei se
     separou por classe tbm") - 1 campo por categoria de combate (DPS/Tank/
@@ -5795,7 +5804,7 @@ class ViewBonusClasseHub(discord.ui.View):
 # `investir_afinidade_em_massa`, aqui só a UI.
 # ==========================================================================
 
-class _ModalInvestirEmMassa(discord.ui.Modal):
+class _ModalInvestirEmMassa(ModalPandora):
     """🔥 `saldo_atual` (2026-09-01, pedido do usuário: "o investir em
     massa tem que informar quanto tenho para investir") - o campo do
     Modal não pode mostrar um valor pronto de antemão sem ser um `Text
@@ -5855,7 +5864,7 @@ class _ModalInvestirEmMassa(discord.ui.Modal):
             await self._view_serie._reeditar_apos_acao_em_massa()
 
 
-class _ViewInvestirEmMassa(discord.ui.View):
+class _ViewInvestirEmMassa(ViewPandora):
     """Escolhe Nível (WiShards) ou Afinidade (Soulstone) - cada um abre o
     Modal que pede só o orçamento, sem precisar escolher personagem
     nenhuma (a ordem por CP decide sozinha onde investir)."""

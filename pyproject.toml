@@ -8,9 +8,29 @@ dependencies = [
     "requests>=2.31",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["pandora*"]
+
+[tool.pytest.ini_options]
+testpaths = ["testes"]
+python_files = ["testar_*.py"]
+python_functions = ["testar_*"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+# So erro de verdade (sintaxe, nome indefinido, import/variavel sem uso).
+# Estilo e comprimento de linha ficam de fora de proposito.
+select = ["E9", "F"]

@@ -185,6 +185,7 @@ def custo_total_item(guild_id, user_id, item, quantidade):
     return sum(preco_unidade_loja(item, ja_comprado + i) for i in range(quantidade))
 
 
+@db.serializar_por_jogador
 def comprar_item(guild_id, user_id, item, quantidade=1):
     """Seção 14 - itens de `ITENS_LOJA` (Roll/Claim Permanente SAÍRAM
     daqui, 2026-09-03 - ver comentário em `ITENS_LOJA`), WiShards como
@@ -192,9 +193,8 @@ def comprar_item(guild_id, user_id, item, quantidade=1):
     if item not in ITENS_LOJA:
         return False, "Item não disponível pra compra na Loja."
     custo_total = custo_total_item(guild_id, user_id, item, quantidade)
-    if db.saldo_wishards(guild_id, user_id) < custo_total:
+    if db.debitar_wishards(guild_id, user_id, custo_total, "loja_item", item) is None:
         return False, f"Custa {db.fmt_numero(custo_total)} WiShards e você não tem o suficiente."
-    db.creditar_wishards(guild_id, user_id, -custo_total, "loja_item", item)
     db.adicionar_item(guild_id, user_id, item, quantidade)
     db.registrar_compra_item(guild_id, user_id, item, quantidade)
     return True, f"Comprado: {CATALOGO_ITENS[item]['nome']} x{quantidade} por {db.fmt_numero(custo_total)} WiShards."
@@ -279,6 +279,7 @@ def custo_total_construcao(nivel_atual, quantidade):
     return sum(custo_construcao(nivel_atual + i) for i in range(1, quantidade + 1))
 
 
+@db.serializar_por_jogador
 def upar_construcao(guild_id, user_id, area, quantidade=1):
     """Sobe o Nível de Construção de `area` pagando WiShards DIRETO,
     sem item/Loja no meio (2026-09-07, pedido do usuário: "Vamos tirar
@@ -296,9 +297,8 @@ def upar_construcao(guild_id, user_id, area, quantidade=1):
         return False, f"{area} já está no teto atual (Nível {teto}) - suba as outras áreas até lá pro teto aumentar."
     quantidade = min(quantidade, teto - nivel_atual)
     custo_total = custo_total_construcao(nivel_atual, quantidade)
-    if db.saldo_wishards(guild_id, user_id) < custo_total:
+    if db.debitar_wishards(guild_id, user_id, custo_total, "upar_construcao", area) is None:
         return False, f"Custa {db.fmt_numero(custo_total)} WiShards e você não tem o suficiente."
-    db.creditar_wishards(guild_id, user_id, -custo_total, "upar_construcao", area)
     novo_nivel = db.subir_construcao(guild_id, user_id, area, quantidade)
     return True, f"🏗️ {area} subiu pro Nível {novo_nivel} (+{quantidade}, {db.fmt_numero(custo_total)} WiShards)!"
 

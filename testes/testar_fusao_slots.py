@@ -13,8 +13,3 @@ def testar_fusao_reutiliza_formacao_e_nao_usa_nomes():
     assert 'Preencha os 5 slots para liberar a Fusão.' in painel
     assert "resolver_nomes_unicos" not in painel
     assert "resolver_nomes_unicos" not in consulta
-
-
-if __name__ == "__main__":
-    testar_fusao_reutiliza_formacao_e_nao_usa_nomes()
-    print("PASS: Fusão usa os slots compartilhados da Party")

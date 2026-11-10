@@ -31,7 +31,8 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
-from pandora import cidade, db, gaia_webhook
+from pandora import db, gaia_webhook
+from pandora.ui_base import ViewPandora
 
 # 🔥 Cards individuais com reação pra reivindicar, estilo Mudae (2026-08-29,
 # pedido do usuário: "quero que cada personagem seja enviada em uma
@@ -913,7 +914,7 @@ async def processar_reacao_claim(client, payload):
             pass
 
 
-class ViewClaimMultiplo(discord.ui.View):
+class ViewClaimMultiplo(ViewPandora):
     """Um botão "💘" por personagem LIVRE rolada na MESMA mensagem - suporta
     tanto um roll único quanto uma "puxada" de várias (pedido do usuário,
     2026-08-29). Personagens já resolvidas como "reencontro"/"terceiro" (ver
@@ -1095,7 +1096,7 @@ async def reivindicar_em_massa(guild_id, user):
     return conquistadas
 
 
-class ViewClaimPendentes(discord.ui.View):
+class ViewClaimPendentes(ViewPandora):
     """Botões de claim pros N personagens ainda pendentes (`/colecao_
     disponiveis`, 2026-08-29) - reaproveita `_processar_claim` (mesmo
     núcleo econômico do botão de `/wa`/da reação), sem rolar nada novo:

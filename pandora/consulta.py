@@ -6,6 +6,7 @@ import difflib
 import math
 
 import discord
+from pandora.ui_base import ViewPandora
 
 _PAGINA_TAMANHO = 10
 _ESTRELAS = {1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐"}
@@ -120,7 +121,7 @@ def linha_populares(indice_global, personagem):
     return f"{indice_global}. {linha_personagem(personagem)} - {personagem.get('popularidade', 0)} curtidas"
 
 
-class ViewColecao(discord.ui.View):
+class ViewColecao(ViewPandora):
     """Paginação simples (◀️/▶️) - mesmo padrão de `musica.ViewListaVotos`,
     sem select por enquanto (nenhuma ação por item ainda). `formatador_linha`
     (opcional) recebe `(posição_global, personagem)` - default reaproveita

@@ -28,6 +28,7 @@ from discord.ext import tasks
 
 from pandora import auto_colecionador, conquistas, consulta, db, gacha, itens, torre
 from pandora.config import FUSO_BRASILIA  # 2026-09-03, movido pra config.py - compartilhado com a Recompensa Diária
+from pandora.registro import log
 
 CATEGORIAS = ("DPS", "Tank", "Support")
 HORARIOS_APARICAO = (10, 14, 18, 22)  # Seção 2, horário de Brasília
@@ -779,15 +780,15 @@ class SchedulerWorldBoss:
         try:
             await self._checar_spawn()
         except Exception as e:
-            print(f" [ERIS] World Boss falhou ao checar spawn: {e}")
+            log.warning(f" [ERIS] World Boss falhou ao checar spawn: {e}")
         try:
             await self._checar_fechamento_inscricoes()
         except Exception as e:
-            print(f" [ERIS] World Boss falhou ao checar fechamento de inscrições: {e}")
+            log.warning(f" [ERIS] World Boss falhou ao checar fechamento de inscrições: {e}")
         try:
             await self._checar_turnos()
         except Exception as e:
-            print(f" [ERIS] World Boss falhou ao checar turnos: {e}")
+            log.warning(f" [ERIS] World Boss falhou ao checar turnos: {e}")
 
     async def _checar_spawn(self):
         agora = datetime.now(FUSO_BRASILIA)
@@ -804,7 +805,7 @@ class SchedulerWorldBoss:
             try:
                 await self._spawnar_guild(guild)
             except Exception as e:
-                print(f" [ERIS] World Boss falhou ao aparecer em {guild.id}: {e}")
+                log.warning(f" [ERIS] World Boss falhou ao aparecer em {guild.id}: {e}")
 
     async def _spawnar_guild(self, guild):
         if await asyncio.to_thread(db.worldboss_evento_ativo, guild.id):
@@ -812,7 +813,7 @@ class SchedulerWorldBoss:
         config = await asyncio.to_thread(db.obter_configuracao_colecao, guild.id)
         canal = auto_colecionador._canal_dos_rolls(guild, config)
         if canal is None:
-            print(f" [ERIS] World Boss sem canal configurado em \"{guild.name}\" (configure com /colecao_admin canal).")
+            log.warning(f" [ERIS] World Boss sem canal configurado em \"{guild.name}\" (configure com /colecao_admin canal).")
             return
         evento_id = await asyncio.to_thread(iniciar_evento, guild.id, canal.id)
         evento = await asyncio.to_thread(db.worldboss_evento_por_id, evento_id)
@@ -830,7 +831,7 @@ class SchedulerWorldBoss:
             try:
                 await self._fechar_evento(evento_id)
             except Exception as e:
-                print(f" [ERIS] World Boss falhou ao fechar inscrições do evento {evento_id}: {e}")
+                log.warning(f" [ERIS] World Boss falhou ao fechar inscrições do evento {evento_id}: {e}")
 
     async def _fechar_evento(self, evento_id):
         iniciou, motivo = await asyncio.to_thread(fechar_inscricoes, evento_id)
@@ -856,7 +857,7 @@ class SchedulerWorldBoss:
             try:
                 await self._executar_e_postar_turno(evento_id)
             except Exception as e:
-                print(f" [ERIS] World Boss falhou ao executar turno do evento {evento_id}: {e}")
+                log.warning(f" [ERIS] World Boss falhou ao executar turno do evento {evento_id}: {e}")
 
     async def _executar_e_postar_turno(self, evento_id):
         evento = await asyncio.to_thread(db.worldboss_evento_por_id, evento_id)
@@ -881,7 +882,7 @@ class SchedulerWorldBoss:
             try:
                 await self._processar_recompensas_e_anunciar(evento_atualizado, canal)
             except Exception as e:
-                print(f" [ERIS] World Boss falhou ao processar recompensas do evento {evento_id}: {e}")
+                log.warning(f" [ERIS] World Boss falhou ao processar recompensas do evento {evento_id}: {e}")
 
     async def _conceder_5_estrela(self, guild_id, membro):
         """Seção 2/3 do doc de recompensas - sorteia 1 5★ elegível (sem

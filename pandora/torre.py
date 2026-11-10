@@ -649,7 +649,6 @@ def subir_max(guild_id, user_id):
         }
 
     chave_ativa = db.chave_torre_ativa(guild_id, user_id)
-    equipe_atual_ids = {p["id"] for p in db.obter_equipe(guild_id, user_id, "party").values()}
     andar = andar_inicial
     recompensa_total = 0
     xp_total = 0
@@ -743,6 +742,7 @@ def _investir_em_massa(guild_id, user_id, orcamento, nivel_maximo, obter_atual, 
     return orcamento - saldo_restante, detalhes
 
 
+@db.serializar_por_jogador
 def investir_nivel_em_massa(guild_id, user_id, orcamento_wishards, colecao=None):
     """Sobe Nível (WiShards) da MAIOR CP pra menor - Seção acima."""
     return _investir_em_massa(
@@ -754,6 +754,7 @@ def investir_nivel_em_massa(guild_id, user_id, orcamento_wishards, colecao=None)
     )
 
 
+@db.serializar_por_jogador
 def investir_afinidade_em_massa(guild_id, user_id, orcamento_soulstone, colecao=None):
     """Sobe Afinidade (Soulstone) da MAIOR CP pra menor - Seção acima."""
     return _investir_em_massa(

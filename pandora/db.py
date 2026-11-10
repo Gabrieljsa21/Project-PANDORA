@@ -12,7 +12,9 @@ claim/troca cai no orçamento de 3s do Discord, um satélite HTTP colocaria
 uma chamada de rede em cima de CADA clique)."""
 import json
 import os
+import functools
 import sqlite3
+import threading
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -869,7 +871,10 @@ def _garantir_pasta():
 @contextmanager
 def conexao():
     _garantir_pasta()
-    conn = sqlite3.connect(CAMINHO_BANCO)
+    # `timeout` = quanto uma escrita espera outra terminar antes de falhar
+    # com "database is locked" (os cliques rodam em threads diferentes via
+    # `asyncio.to_thread`). O modo WAL é ligado 1x em `inicializar()`.
+    conn = sqlite3.connect(CAMINHO_BANCO, timeout=ESPERA_BANCO_OCUPADO_SEGUNDOS)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -878,7 +883,62 @@ def conexao():
         conn.close()
 
 
+ESPERA_BANCO_OCUPADO_SEGUNDOS = 15
+
+_travas_por_jogador = {}
+_trava_do_mapa_de_travas = threading.Lock()
+
+
+def serializar_por_jogador(funcao):
+    """Decorador pra função `f(guild_id, user_id, ...)` que confere um
+    estado e depois o altera (comprar, upar, fortalecer). Dois cliques
+    simultâneos do MESMO jogador rodam um depois do outro, então o segundo
+    já enxerga o saldo e o nível deixados pelo primeiro (sem isso, os dois
+    liam o mesmo nível e pagavam duas vezes pelo mesmo degrau). Reentrante:
+    uma função decorada pode chamar outra do mesmo jogador."""
+    @functools.wraps(funcao)
+    def embrulho(guild_id, user_id, *args, **kwargs):
+        chave = (str(guild_id), str(user_id))
+        with _trava_do_mapa_de_travas:
+            trava = _travas_por_jogador.setdefault(chave, threading.RLock())
+        with trava:
+            return funcao(guild_id, user_id, *args, **kwargs)
+    return embrulho
+
+
+def _ligar_wal():
+    """Modo WAL: leitura não espera escrita e vice-versa (no modo antigo,
+    "delete", um clique de consulta ficava parado atrás de qualquer
+    gravação). Fica gravado no próprio arquivo do banco, então basta 1x.
+    Com WAL existem também `pandora.db-wal`/`-shm` ao lado do banco: pra
+    copiar o banco com o bot ligado, usar `db.copia_de_seguranca`, nunca
+    copiar só o `.db`."""
+    conn = sqlite3.connect(CAMINHO_BANCO, timeout=ESPERA_BANCO_OCUPADO_SEGUNDOS)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        conn.close()
+
+
+def copia_de_seguranca(destino):
+    """Cópia consistente do banco (API de backup do SQLite), segura com o
+    bot ligado e com o modo WAL. Devolve `destino`."""
+    origem = sqlite3.connect(CAMINHO_BANCO, timeout=ESPERA_BANCO_OCUPADO_SEGUNDOS)
+    try:
+        copia = sqlite3.connect(destino)
+        try:
+            origem.backup(copia)
+        finally:
+            copia.close()
+    finally:
+        origem.close()
+    return destino
+
+
 def inicializar():
+    _garantir_pasta()
+    _ligar_wal()
     with conexao() as conn:
         # 🔥 Migração de RUPTURA (2026-09-01) - `colecao_cards_pendentes`
         # trocou a PK de `message_id` sozinho pra `(message_id, emoji)`
@@ -1162,23 +1222,60 @@ def inicializar():
             if coluna_cidade not in colunas_cidade:
                 conn.execute(f"ALTER TABLE colecao_cidade_estado ADD COLUMN {coluna_cidade} REAL NOT NULL DEFAULT 0")
 
-        # 🔥 Fusão Wishlist -> Favoritos (2026-09-03, pedido do usuário:
-        # "tem Favoritos e Wishlist, Vamos unir tudo em Wishlist... melhor
-        # manter o favoritos e apenas renomea-lo para wishlist") - as 2
-        # tabelas sempre foram estruturalmente idênticas (`guild_id,
-        # user_id, personagem_id`), a diferença toda era regra de
-        # aplicação (JOIN/checagem de posse), não schema. Copia toda
-        # entrada de `colecao_wishlist` pra `colecao_favoritas` (`INSERT OR
-        # IGNORE` - idempotente, roda em TODO boot sem duplicar nem
-        # sobrescrever o que já foi migrado) - ninguém perde o que já
-        # tinha na wishlist antiga só porque o mecanismo mudou de nome.
-        # `colecao_wishlist` continua existindo (sem migração destrutiva,
-        # mesmo padrão de toda tabela aposentada neste projeto), só para
-        # de ser LIDA por qualquer código novo.
+        _aplicar_migracoes_numeradas(conn)
+
+
+def _migracao_001_wishlist_para_favoritos(conn):
+    """Fusão Wishlist -> Favoritos (2026-09-03, pedido do usuário: "tem
+    Favoritos e Wishlist, Vamos unir tudo em Wishlist... melhor manter o
+    favoritos e apenas renomea-lo para wishlist"): copia toda entrada de
+    `colecao_wishlist` pra `colecao_favoritas`. `colecao_wishlist` continua
+    existindo (sem migração destrutiva), só não é mais lida.
+
+    Até a 0.2.0 isto rodava em TODO boot, e como `colecao_wishlist` nunca
+    é apagada, um favorito removido depois da fusão voltava sozinho a cada
+    reinício do bot. Agora roda 1x só."""
+    conn.execute(
+        "INSERT OR IGNORE INTO colecao_favoritas (guild_id, user_id, personagem_id) "
+        "SELECT guild_id, user_id, personagem_id FROM colecao_wishlist",
+    )
+
+
+# Migrações de dado ou de schema que precisam rodar EXATAMENTE 1x, em
+# ordem. Mudança nova entra aqui com o próximo número (nunca reordenar nem
+# reaproveitar número; nunca destrutiva, ver CLAUDE.md). O que cada banco
+# já aplicou fica em `colecao_schema_version`.
+#
+# O bloco acima, em `inicializar()` (`_SCHEMA` + `ALTER TABLE` condicionado
+# por `PRAGMA table_info`), é o esquema-base de antes deste mecanismo:
+# idempotente, continua rodando em todo boot e não recebe mais nada novo
+# além de `CREATE TABLE IF NOT EXISTS` em `_SCHEMA`.
+_MIGRACOES = [
+    (1, "Fusão Wishlist -> Favoritos (cópia única)", _migracao_001_wishlist_para_favoritos),
+]
+
+
+def _aplicar_migracoes_numeradas(conn):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS colecao_schema_version ("
+        "versao INTEGER PRIMARY KEY, descricao TEXT NOT NULL, aplicada_em TEXT NOT NULL)"
+    )
+    aplicadas = {r["versao"] for r in conn.execute("SELECT versao FROM colecao_schema_version")}
+    for versao, descricao, migrar in _MIGRACOES:
+        if versao in aplicadas:
+            continue
+        migrar(conn)
         conn.execute(
-            "INSERT OR IGNORE INTO colecao_favoritas (guild_id, user_id, personagem_id) "
-            "SELECT guild_id, user_id, personagem_id FROM colecao_wishlist",
+            "INSERT INTO colecao_schema_version (versao, descricao, aplicada_em) VALUES (?, ?, ?)",
+            (versao, descricao, datetime.now(timezone.utc).isoformat()),
         )
+
+
+def versao_schema():
+    """Maior migração numerada já aplicada neste banco (0 = nenhuma)."""
+    with conexao() as conn:
+        linha = conn.execute("SELECT MAX(versao) AS v FROM colecao_schema_version").fetchone()
+    return linha["v"] or 0
 
 
 # --------------------------------------------------------------------------
@@ -2184,6 +2281,7 @@ def comprar_slot_serie_favorita(guild_id, user_id):
     return False, "Slots de Série Favorita são desbloqueados pela Torre, igual à Wishlist."
 
 
+@serializar_por_jogador
 def _comprar_slot_serie_favorita_legado(guild_id, user_id):
     """Mesmo padrão de `comprar_upgrade_rolls`/`comprar_upgrade_claims` -
     preço escalonado (`PRECOS_UPGRADE_SLOT_SERIE_FAVORITA`, "primeiro
@@ -2198,9 +2296,8 @@ def _comprar_slot_serie_favorita_legado(guild_id, user_id):
         return False, "Você já tem o número máximo de slots de Série Favorita."
     proximo_nivel = nivel_atual + 1
     preco = PRECOS_UPGRADE_SLOT_SERIE_FAVORITA[proximo_nivel]
-    if saldo_wishards(guild_id, user_id) < preco:
+    if debitar_wishards(guild_id, user_id, preco, "upgrade_slot_serie_favorita", f"nivel {proximo_nivel}") is None:
         return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
-    creditar_wishards(guild_id, user_id, -preco, "upgrade_slot_serie_favorita", f"nivel {proximo_nivel}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
@@ -2340,6 +2437,7 @@ def nivel_upgrade_slots_personagem_favorita(guild_id, user_id):
     return linha["nivel_upgrade_slots_personagem_favorita"] if linha else 0
 
 
+@serializar_por_jogador
 def comprar_slot_personagem_favorita(guild_id, user_id):
     """Mesmo padrão de `comprar_slot_serie_favorita` - preço escalonado,
     1 slot a mais por nível, `SLOTS_BASE_PERSONAGEM_FAVORITA` (5) + até
@@ -2349,9 +2447,8 @@ def comprar_slot_personagem_favorita(guild_id, user_id):
         return False, "Você já tem o número máximo de slots de Waifu."
     proximo_nivel = nivel_atual + 1
     preco = PRECOS_UPGRADE_SLOT_PERSONAGEM_FAVORITA[proximo_nivel]
-    if saldo_wishards(guild_id, user_id) < preco:
+    if debitar_wishards(guild_id, user_id, preco, "upgrade_slot_personagem_favorita", f"nivel {proximo_nivel}") is None:
         return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
-    creditar_wishards(guild_id, user_id, -preco, "upgrade_slot_personagem_favorita", f"nivel {proximo_nivel}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
@@ -2490,6 +2587,7 @@ def custo_total_ate_nivel(raridade, nivel_atual, nivel_alvo):
     return sum(custo_proximo_nivel(raridade, n) for n in range(nivel_atual, nivel_alvo))
 
 
+@serializar_por_jogador
 def subir_nivel_ate(guild_id, user_id, personagem_id, nivel_alvo):
     """Devolve (ok: bool, mensagem: str) - pula DIRETO pro `nivel_alvo`
     (2026-08-30, substitui o antigo "+1 por clique" - dropdown escolhe o
@@ -2510,9 +2608,8 @@ def subir_nivel_ate(guild_id, user_id, personagem_id, nivel_alvo):
     if nivel_alvo > NIVEL_MAXIMO_PERSONAGEM:
         return False, f"Nível máximo é {NIVEL_MAXIMO_PERSONAGEM}."
     custo = custo_total_ate_nivel(personagem["raridade"], nivel_atual, nivel_alvo)
-    if saldo_wishards(guild_id, user_id) < custo:
+    if debitar_wishards(guild_id, user_id, custo, "upgrade_nivel_personagem", personagem["nome"], str(personagem_id)) is None:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
-    creditar_wishards(guild_id, user_id, -custo, "upgrade_nivel_personagem", personagem["nome"], str(personagem_id))
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_afinidade (guild_id, user_id, personagem_id, afinidade, nivel) VALUES (?, ?, ?, 1, ?) "
@@ -2547,6 +2644,7 @@ def custo_total_ate_afinidade(afinidade_atual, afinidade_alvo):
     return sum(a + 1 for a in range(afinidade_atual, afinidade_alvo))
 
 
+@serializar_por_jogador
 def subir_afinidade_ate(guild_id, user_id, personagem_id, afinidade_alvo):
     """Devolve (ok: bool, mensagem: str) - pula DIRETO pra `afinidade_
     alvo` (2026-08-30, mesmo padrão de `subir_nivel_ate`), gasta SOULSTONE
@@ -2566,9 +2664,8 @@ def subir_afinidade_ate(guild_id, user_id, personagem_id, afinidade_alvo):
     if afinidade_alvo > NIVEL_MAXIMO_AFINIDADE:
         return False, f"Afinidade máxima é {NIVEL_MAXIMO_AFINIDADE}."
     custo = custo_total_ate_afinidade(afinidade_atual, afinidade_alvo)
-    if saldo_soulstone(guild_id, user_id) < custo:
+    if debitar_soulstone(guild_id, user_id, custo, "upgrade_afinidade", personagem["nome"], str(personagem_id)) is None:
         return False, f"Custa {fmt_numero(custo)} Soulstone e você não tem o suficiente."
-    creditar_soulstone(guild_id, user_id, -custo, "upgrade_afinidade", personagem["nome"], str(personagem_id))
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_afinidade (guild_id, user_id, personagem_id, afinidade) VALUES (?, ?, ?, ?) "
@@ -2600,30 +2697,49 @@ def saldo_wishards(guild_id, user_id):
     return linha["saldo"] if linha else 0
 
 
+def _movimentar_saldo(moeda, guild_id, user_id, quantidade, origem, motivo, referencia, exigir_saldo):
+    """Saldo + ledger de `moeda` ("wishards"/"soulstone") na MESMA
+    transação de escrita (`BEGIN IMMEDIATE` trava o banco ANTES de ler o
+    saldo, então duas movimentações simultâneas nunca partem do mesmo
+    saldo). Com `exigir_saldo`, não grava nada e devolve None se o saldo
+    ficaria negativo. Devolve o novo saldo."""
+    agora = datetime.now(timezone.utc).isoformat()
+    chave = (str(guild_id), str(user_id))
+    with conexao() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        linha = conn.execute(
+            f"SELECT saldo FROM colecao_{moeda}_saldo WHERE guild_id = ? AND user_id = ?", chave,
+        ).fetchone()
+        novo_saldo = (linha["saldo"] if linha else 0) + quantidade
+        if exigir_saldo and novo_saldo < 0:
+            return None
+        conn.execute(
+            f"INSERT INTO colecao_{moeda}_saldo (guild_id, user_id, saldo) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET saldo = excluded.saldo",
+            (*chave, novo_saldo),
+        )
+        conn.execute(
+            f"INSERT INTO colecao_{moeda}_ledger "
+            "(guild_id, user_id, quantidade, origem, motivo, referencia, saldo_resultante, criado_em) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (*chave, quantidade, origem, motivo, referencia, novo_saldo, agora),
+        )
+        return novo_saldo
+
+
 def creditar_wishards(guild_id, user_id, quantidade, origem, motivo=None, referencia=None):
     """Ledger + saldo sempre juntos na mesma transação - nunca só um dos
     dois (Seção 6 do plano: "a economia deve usar preferencialmente um
-    ledger"). `quantidade` pode ser negativa (gasto - fases futuras de loja/
-    upgrades). Devolve o novo saldo."""
-    agora = datetime.now(timezone.utc).isoformat()
-    with conexao() as conn:
-        linha = conn.execute(
-            "SELECT saldo FROM colecao_wishards_saldo WHERE guild_id = ? AND user_id = ?",
-            (str(guild_id), str(user_id)),
-        ).fetchone()
-        novo_saldo = (linha["saldo"] if linha else 0) + quantidade
-        conn.execute(
-            "INSERT INTO colecao_wishards_saldo (guild_id, user_id, saldo) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET saldo = excluded.saldo",
-            (str(guild_id), str(user_id), novo_saldo),
-        )
-        conn.execute(
-            "INSERT INTO colecao_wishards_ledger "
-            "(guild_id, user_id, quantidade, origem, motivo, referencia, saldo_resultante, criado_em) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(guild_id), str(user_id), quantidade, origem, motivo, referencia, novo_saldo, agora),
-        )
-        return novo_saldo
+    ledger"). Devolve o novo saldo. Pra GASTO, usar `debitar_wishards`
+    (recusa saldo insuficiente); `quantidade` negativa aqui continua aceita
+    só por compatibilidade e não confere saldo."""
+    return _movimentar_saldo("wishards", guild_id, user_id, quantidade, origem, motivo, referencia, exigir_saldo=False)
+
+
+def debitar_wishards(guild_id, user_id, custo, origem, motivo=None, referencia=None):
+    """Gasta `custo` WiShards se houver saldo: conferir e descontar são 1
+    operação só. Devolve o novo saldo, ou None (nada cobrado) se faltar."""
+    return _movimentar_saldo("wishards", guild_id, user_id, -custo, origem, motivo, referencia, exigir_saldo=True)
 
 
 def saldo_soulstone(guild_id, user_id):
@@ -2639,27 +2755,13 @@ def saldo_soulstone(guild_id, user_id):
 
 
 def creditar_soulstone(guild_id, user_id, quantidade, origem, motivo=None, referencia=None):
-    """Cópia estrutural de `creditar_wishards` - ledger + saldo sempre
-    juntos na mesma transação, `quantidade` pode ser negativa (gasto)."""
-    agora = datetime.now(timezone.utc).isoformat()
-    with conexao() as conn:
-        linha = conn.execute(
-            "SELECT saldo FROM colecao_soulstone_saldo WHERE guild_id = ? AND user_id = ?",
-            (str(guild_id), str(user_id)),
-        ).fetchone()
-        novo_saldo = (linha["saldo"] if linha else 0) + quantidade
-        conn.execute(
-            "INSERT INTO colecao_soulstone_saldo (guild_id, user_id, saldo) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET saldo = excluded.saldo",
-            (str(guild_id), str(user_id), novo_saldo),
-        )
-        conn.execute(
-            "INSERT INTO colecao_soulstone_ledger "
-            "(guild_id, user_id, quantidade, origem, motivo, referencia, saldo_resultante, criado_em) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(guild_id), str(user_id), quantidade, origem, motivo, referencia, novo_saldo, agora),
-        )
-        return novo_saldo
+    """Mesmo contrato de `creditar_wishards`."""
+    return _movimentar_saldo("soulstone", guild_id, user_id, quantidade, origem, motivo, referencia, exigir_saldo=False)
+
+
+def debitar_soulstone(guild_id, user_id, custo, origem, motivo=None, referencia=None):
+    """Mesmo contrato de `debitar_wishards`."""
+    return _movimentar_saldo("soulstone", guild_id, user_id, -custo, origem, motivo, referencia, exigir_saldo=True)
 
 
 # --------------------------------------------------------------------------
@@ -2683,6 +2785,7 @@ PRECOS_LOJA = {1: 250, 2: 500, 3: 1000, 4: 2500, 5: 5000}
 PRECOS_GARANTIA = {raridade: preco // 2 for raridade, preco in PRECOS_LOJA.items() if raridade >= 3}
 
 
+@serializar_por_jogador
 def comprar_personagem(guild_id, user_id, personagem_id):
     """Só personagens LIVRES nesse servidor podem ser compradas (Seção 10).
     Desconta o preço ANTES de tentar `reivindicar` - se perder a corrida
@@ -2694,10 +2797,8 @@ def comprar_personagem(guild_id, user_id, personagem_id):
     if dono_do_personagem(guild_id, personagem_id) is not None:
         return False, "Essa personagem já tem dono nesse servidor."
     preco = PRECOS_LOJA.get(personagem["raridade"])
-    if saldo_wishards(guild_id, user_id) < preco:
+    if debitar_wishards(guild_id, user_id, preco, "loja_compra", personagem["nome"], str(personagem_id)) is None:
         return False, f"Custa {fmt_numero(preco)} WiShards e você não tem o suficiente."
-
-    creditar_wishards(guild_id, user_id, -preco, "loja_compra", personagem["nome"], str(personagem_id))
     if not reivindicar(guild_id, personagem_id, user_id):
         creditar_wishards(guild_id, user_id, preco, "loja_reembolso", personagem["nome"], str(personagem_id))
         return False, "Alguém conseguiu essa personagem antes de você - reembolsado."
@@ -4271,6 +4372,7 @@ def custo_total_treinamento_ate(nivel_atual, nivel_alvo, desconto=0.0):
     return round(bruto * (1 - desconto))
 
 
+@serializar_por_jogador
 def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
     """+CP FIXO por personagem, pra sempre, SEM nível máximo (Seção 7) -
     pula DIRETO pro `nivel_alvo` (2026-08-30, substitui o antigo "+1 por
@@ -4282,9 +4384,8 @@ def comprar_treinamento_global_ate(guild_id, user_id, nivel_alvo):
         return False, f"Treinamento da Coleção já está no Nível {nivel_atual} ou acima."
     desconto = desconto_por_nivel_progressao(estado["nivel"])
     custo = custo_total_treinamento_ate(nivel_atual, nivel_alvo, desconto)
-    if saldo_wishards(guild_id, user_id) < custo:
+    if debitar_wishards(guild_id, user_id, custo, "treinamento_global", f"nível {nivel_atual}->{nivel_alvo}") is None:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
-    creditar_wishards(guild_id, user_id, -custo, "treinamento_global", f"nível {nivel_atual}->{nivel_alvo}")
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_progressao (guild_id, user_id, nivel_treinamento_global) VALUES (?, ?, ?) "
@@ -4309,6 +4410,7 @@ def custo_total_potencial_ate(nivel_atual, nivel_alvo, desconto=0.0):
     return round(bruto * (1 - desconto))
 
 
+@serializar_por_jogador
 def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
     """+CP PERCENTUAL global, pra sempre, SEM nível máximo (Seção 7) -
     custo cresce mais rápido que o Treinamento Global de propósito ("a
@@ -4320,9 +4422,8 @@ def comprar_potencial_colecao_ate(guild_id, user_id, nivel_alvo):
         return False, f"Maestria da Coleção já está no Nível {nivel_atual} ou acima."
     desconto = desconto_por_nivel_progressao(estado["nivel"])
     custo = custo_total_potencial_ate(nivel_atual, nivel_alvo, desconto)
-    if saldo_wishards(guild_id, user_id) < custo:
+    if debitar_wishards(guild_id, user_id, custo, "potencial_colecao", f"nível {nivel_atual}->{nivel_alvo}") is None:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
-    creditar_wishards(guild_id, user_id, -custo, "potencial_colecao", f"nível {nivel_atual}->{nivel_alvo}")
     with conexao() as conn:
         conn.execute(
             "INSERT INTO colecao_progressao (guild_id, user_id, nivel_potencial_colecao) VALUES (?, ?, ?) "
@@ -4550,6 +4651,7 @@ def nivel_upgrade_rolls(guild_id, user_id):
     return linha["nivel_upgrade_rolls"] if linha else 0
 
 
+@serializar_por_jogador
 def comprar_upgrade_rolls_ate(guild_id, user_id, nivel_alvo):
     """Devolve (ok: bool, mensagem: str) - pula DIRETO pro `nivel_alvo`
     (2026-09-03, substitui o antigo "+1 nível por clique" agora que o
@@ -4561,10 +4663,8 @@ def comprar_upgrade_rolls_ate(guild_id, user_id, nivel_alvo):
     if nivel_alvo <= nivel_atual:
         return False, f"Upgrade de rolls já está no nível {nivel_atual} ou acima."
     custo = custo_total_upgrade_rolls_ate(nivel_atual, nivel_alvo)
-    if saldo_wishards(guild_id, user_id) < custo:
+    if debitar_wishards(guild_id, user_id, custo, "upgrade_rolls", f"nível {nivel_atual}->{nivel_alvo}") is None:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
-
-    creditar_wishards(guild_id, user_id, -custo, "upgrade_rolls", f"nível {nivel_atual}->{nivel_alvo}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(
@@ -4611,6 +4711,7 @@ def nivel_upgrade_claims(guild_id, user_id):
     return linha["nivel_upgrade_claims"] if linha else 0
 
 
+@serializar_por_jogador
 def comprar_upgrade_claims_ate(guild_id, user_id, nivel_alvo):
     """Devolve (ok: bool, mensagem: str) - mesmo padrão de `comprar_
     upgrade_rolls_ate`. +1 claim PERMANENTE por nível em cima do
@@ -4620,10 +4721,8 @@ def comprar_upgrade_claims_ate(guild_id, user_id, nivel_alvo):
     if nivel_alvo <= nivel_atual:
         return False, f"Upgrade de claims já está no nível {nivel_atual} ou acima."
     custo = custo_total_upgrade_claims_ate(nivel_atual, nivel_alvo)
-    if saldo_wishards(guild_id, user_id) < custo:
+    if debitar_wishards(guild_id, user_id, custo, "upgrade_claims", f"nível {nivel_atual}->{nivel_alvo}") is None:
         return False, f"Custa {fmt_numero(custo)} WiShards e você não tem o suficiente."
-
-    creditar_wishards(guild_id, user_id, -custo, "upgrade_claims", f"nível {nivel_atual}->{nivel_alvo}")
     agora = datetime.now(timezone.utc).isoformat()
     with conexao() as conn:
         conn.execute(

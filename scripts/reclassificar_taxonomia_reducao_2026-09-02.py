@@ -17,9 +17,10 @@ Backup feito ANTES em `data/pandora_backup_pre_reducao_taxonomia_
 2026-09-02.db`. Mesmo raciocínio de sempre: sem migração de bônus de CP
 necessária, `bonus_cp_classe`/`info_classes_em_lote` recalculam direto da
 classe atual."""
+import os
 import sqlite3
 
-CAMINHO_BANCO = "data/pandora.db"
+CAMINHO_BANCO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 # (classes antigas, classe final, categoria_combate final, funcao_cidade final)
 MERGES = [

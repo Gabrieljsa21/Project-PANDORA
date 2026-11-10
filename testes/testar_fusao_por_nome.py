@@ -11,8 +11,3 @@ def testar_fluxo_por_nome_foi_removido():
     assert "_ModalNomesSacrificioMerge" not in painel
     assert "resolver_nomes_unicos" not in painel
     assert "resolver_nomes_unicos" not in consulta
-
-
-if __name__ == "__main__":
-    testar_fluxo_por_nome_foi_removido()
-    print("PASS: Fusão não usa nomes aproximados")
