@@ -49,6 +49,16 @@ from pandora import db, gacha, paineis
 db.inicializar()
 ```
 
+## Testes
+
+```powershell
+pip install -e ".[dev]"
+ruff check .
+pytest
+```
+
+Cada teste usa um banco SQLite temporário; o banco real em `data/` nunca é aberto.
+
 ## Integrações com outros projetos
 
 - **ERIS:** oferece os comandos, botões e mensagens do Discord usados para jogar.
@@ -69,7 +79,7 @@ O script só lê o banco de origem e pode ser executado mais de uma vez.
 - [Pendências](docs/TODO.md)
 - [Especificações](docs/specs/)
 - [Histórico de versões](CHANGELOG.md)
-- [Padrão de documentação](docs/PADRAO_DOCUMENTACAO.md)
+- [Fórmulas e balanceamento](docs/FORMULAS_E_BALANCEAMENTO.md)
 
 ## Situação atual
 

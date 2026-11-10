@@ -619,9 +619,12 @@ personagem à escolha, dentro da mesma faixa de raridade:
 Se a escolhida for reivindicada por outra pessoa no meio do processo, a
 Fusão é cancelada com aviso, sem perder as 5 sacrificadas.
 
-> ⚠️ O comando de barra `/merge` está com um bug de assinatura desatualizada
-> e provavelmente quebra ao ser usado - o fluxo que funciona de verdade hoje
-> é só pelo botão "🧬 Fusão" do hub. Ver `TODO.md`.
+O comando de barra `/merge` (sem parâmetros) abre este mesmo painel, igual
+ao botão "🧬 Fusão" do hub.
+
+Se qualquer botão, dropdown ou Modal do jogo falhar por erro interno, o
+jogador recebe uma mensagem efêmera ("Algo deu errado ao processar essa
+ação...") em vez de só "Esta interação falhou".
 
 ---
 
@@ -1057,5 +1060,5 @@ regra naquele servidor:
   pra cada uma.
 - **`/carteira [membro]`**: saldo de WiShards (próprio ou de outra
   pessoa).
-- **`/merge`**: ver aviso na seção "🧬 Fusão" acima (comando com bug
-  conhecido - usar o botão do hub em vez disso).
+- **`/merge`**: abre o painel de Fusão (mesmo do botão "🧬 Fusão" do hub),
+  sem parâmetros.

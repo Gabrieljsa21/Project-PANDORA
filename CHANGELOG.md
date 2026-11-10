@@ -7,6 +7,35 @@ Histórico de alto nível do que muda no PANDORA, por versão. Ver
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+Leva de melhorias pedida depois de uma análise do projeto: **"analisa o Project-PANDORA e ve se tem alguma sugestao de melhoria"**, seguido de **"Implemente tudo"**.
+
+### Corrigido (2026-11-10, economia e cliques simultâneos)
+
+- **Gasto de WiShards/Soulstone não deixa mais saldo negativo com cliques simultâneos**: conferir o saldo e descontar eram duas operações em conexões diferentes, e os cliques rodam em threads (`asyncio.to_thread`). Agora existe `db.debitar_wishards`/`db.debitar_soulstone`, que conferem e descontam numa transação só (`BEGIN IMMEDIATE`) e devolvem `None` sem cobrar se faltar saldo. Os 15 pontos de gasto do pacote passaram a usar isso.
+- **Dois cliques no mesmo botão de compra não cobram duas vezes pelo mesmo degrau**: as funções de compra/upgrade (`subir_nivel_ate`, `subir_afinidade_ate`, `comprar_*_ate`, `comprar_personagem`, `comprar_item`, `upar_construcao`, `fortalecer_ate`, `ascender_ate`, Investir em Massa) rodam em fila por jogador (`db.serializar_por_jogador`).
+- **Troca com WiShards cobra antes de mover personagem**: se um dos lados gastou o saldo entre a validação e a execução, a troca é cancelada com estorno, sem transferir nada.
+- **Reagir com ⭐ num roll voltou a funcionar**: a reação reivindicava a personagem e depois quebrava com `AttributeError` (`db.favoritar` deixou de existir na fusão Favoritos/Wishlist de 2026-09-03); o card de confirmação nunca aparecia e a personagem não entrava na Wishlist. Agora chama `db.wishlist_adicionar`.
+- **Favorito removido não volta mais a cada reinício do bot**: a cópia Wishlist antiga -> Favoritos rodava em todo boot e `colecao_wishlist` nunca é apagada. Virou a migração numerada 1, que roda uma vez só. No primeiro boot com esta versão ela ainda roda uma última vez.
+- **Erro num botão, dropdown ou Modal agora avisa o jogador**: toda View/Modal herda de `ui_base.ViewPandora`/`ModalPandora`, cujo `on_error` responde com uma mensagem efêmera e grava o traceback no log. Antes aparecia só "Esta interação falhou".
+- **Código morto**: `return True, vencedor` inalcançável em `batalha.papel_do_jogador` e uma consulta de Party sem uso em `torre.subir_max`.
+
+### Alterado (2026-11-10, banco, estrutura e log)
+
+- **SQLite em modo WAL, com espera de 15s por escrita**: leitura não fica mais parada atrás de gravação (e vice-versa). `db.copia_de_seguranca(destino)` faz cópia consistente com o bot ligado; copiar só o `.db` deixou de ser seguro, porque agora existem `pandora.db-wal`/`-shm`.
+- **Migrações numeradas** (`colecao_schema_version`, lista `_MIGRACOES` em `pandora/db/nucleo.py`): mudança nova que precisa rodar uma vez entra ali com o próximo número. O bloco antigo de `ALTER TABLE` condicionado continua rodando em todo boot, sem receber nada novo.
+- **`pandora/db.py` (5,4 mil linhas) virou o pacote `pandora/db/`**, dividido por domínio: `nucleo`, `colecao`, `estado`, `economia`, `combate`, `favoritas`, `inventario`. `from pandora import db` e `db.<nome>` continuam iguais (o `__init__` reexporta tudo).
+- **`pandora/paineis.py` (5,9 mil linhas) virou o pacote `pandora/paineis/`**, dividido por tela: `comum`, `personagem`, `equipe`, `cidade`, `colecao`, `loja`, `batalha`, `inventario`, `series`, `waifus`, `hub`. `paineis.<nome>` continua igual. Divisão mecânica: o corpo de cada função e classe é idêntico ao de antes.
+- **`print` virou `logging`** (`pandora.registro.log`, logger `"pandora"`): continua saindo no stdout, então o arquivo de log do ERIS recebe igual. Os rastros passo a passo de Séries Favoritas e Batalha viraram DEBUG (ligar com `PANDORA_LOG_NIVEL=DEBUG`).
+- **Scripts de `scripts/` acham o banco pelo próprio caminho do arquivo**: não dependem mais do diretório de trabalho nem de `C:\Workspace\Project-PANDORA` fixo.
+
+### Adicionado (2026-11-10, testes e CI)
+
+- **`paineis.abrir_fusao(interaction)`**: entrada pública da Fusão, usada pelo `/merge` do ERIS (que estava quebrado desde 2026-09-02 por chamar `executar_merge` com a assinatura antiga).
+- **Suíte com pytest** (35 testes, banco temporário por teste, nunca o de produção): saldo sob concorrência, troca com estorno, WAL e migrações, fórmulas de custo/Torre/Batalha, `on_error` das Views e o contrato de nomes que o ERIS importa. `pip install -e ".[dev]"` e `pytest`.
+- **ruff** (só erro de verdade: sintaxe, nome indefinido, import/variável sem uso) e **GitHub Actions** (`.github/workflows/testes.yml`) rodando ruff + pytest em toda PR.
+
 ## [0.2.0] - 2026-10-14
 
 Fecha numa versão tudo o que estava acumulado sob `[Unreleased]` desde a 0.1.0.
