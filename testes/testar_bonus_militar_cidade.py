@@ -48,7 +48,7 @@ def testar_tabela_de_slots_favoritos():
 def testar_fortalecimento_do_slot_nao_pula_degraus_por_base_alta(monkeypatch):
     # Popularidade máxima do catálogo fixada (era lida do banco real, então
     # o teste só passava na máquina com `data/pandora.db` de produção).
-    monkeypatch.setattr(db, "_popularidade_maxima_cache", 11_266)
+    monkeypatch.setattr(db.combate, "_popularidade_maxima_cache", 11_266)
     # Mesmo uma personagem de Base natural 1.000 começa no primeiro patamar
     # do slot. Os degraus iniciais não mudam seu CP, mas são obrigatórios.
     power, proximo = personagens_favoritas._estado_fortalecimento(11_266, 0)

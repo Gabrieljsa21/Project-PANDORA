@@ -13,7 +13,7 @@ from pandora import db  # noqa: E402
 
 @pytest.fixture
 def banco(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "PASTA_DADOS", str(tmp_path))
-    monkeypatch.setattr(db, "CAMINHO_BANCO", str(tmp_path / "pandora_teste.db"))
+    monkeypatch.setattr(db.nucleo, "PASTA_DADOS", str(tmp_path))
+    monkeypatch.setattr(db.nucleo, "CAMINHO_BANCO", str(tmp_path / "pandora_teste.db"))
     db.inicializar()
     return db

@@ -905,7 +905,7 @@ async def processar_reacao_claim(client, payload):
     # Coleção continuam existindo (ainda mostram o que já foi marcado
     # antes), só não tem mais um jeito NOVO de marcar via reação de roll.
     if pendente["acao"] == "favoritar":
-        await asyncio.to_thread(db.favoritar, pendente["guild_id"], membro.id, personagem["id"])
+        await asyncio.to_thread(db.wishlist_adicionar, pendente["guild_id"], membro.id, personagem["id"])
         embed.add_field(name="⭐ Favoritada!", value="Já marcada como favorita.", inline=False)
     if canal is not None:
         try:
