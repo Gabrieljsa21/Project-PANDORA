@@ -16,6 +16,7 @@ import json
 import urllib.request
 
 from pandora.config import URL_BASE_GAIA
+from pandora.registro import log
 
 TIMEOUT_SEGUNDOS = 30  # generoso de propósito - a GAIA pode estar processando LLM/ferramenta
 
@@ -28,7 +29,7 @@ def _post(caminho, corpo, timeout=TIMEOUT_SEGUNDOS):
             corpo_resposta = resp.read()
             return json.loads(corpo_resposta) if corpo_resposta else {}
     except Exception as e:
-        print(f" [PANDORA] GAIA não respondeu ({caminho}): {e}")
+        log.warning(f" [PANDORA] GAIA não respondeu ({caminho}): {e}")
         return None
 
 

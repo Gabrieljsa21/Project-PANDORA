@@ -24,9 +24,10 @@ numa classe JÁ EXISTENTE que fizesse sentido de verdade:
 
 Backup feito ANTES em `data/pandora_backup_pre_bardo_individual_2026-09-
 02.db`."""
+import os
 import sqlite3
 
-CAMINHO_BANCO = "data/pandora.db"
+CAMINHO_BANCO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 RECLASSIFICACOES = {
     # id: (classe_final, justificativa curta)

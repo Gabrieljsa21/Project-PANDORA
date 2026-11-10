@@ -41,6 +41,7 @@ import discord
 from discord.ext import tasks
 
 from pandora import db, gacha
+from pandora.registro import log
 
 # 🔥 Minuto de disparo (roll) e de decisão (claim) por papel - pedido
 # explícito do usuário. Só os papéis "principal" (GAIA) e "musica" (ERIS)
@@ -137,13 +138,13 @@ class AutoColecionador:
             try:
                 await self._rodar_tiros_guild(guild)
             except Exception as e:
-                print(f" [ERIS] Auto-colecionador ({self.client.user}) falhou ao rolar em {guild.id}: {e}")
+                log.warning(f" [ERIS] Auto-colecionador ({self.client.user}) falhou ao rolar em {guild.id}: {e}")
 
     async def _rodar_tiros_guild(self, guild):
         config = await asyncio.to_thread(db.obter_configuracao_colecao, guild.id)
         canal = _canal_dos_rolls(guild, config)
         if canal is None:
-            print(f" [ERIS] Auto-colecionador ({self.client.user}) sem canal pra rolar em \"{guild.name}\" (configure com /colecao_admin canal).")
+            log.warning(f" [ERIS] Auto-colecionador ({self.client.user}) sem canal pra rolar em \"{guild.name}\" (configure com /colecao_admin canal).")
             return
 
         user_id = self.client.user.id
@@ -174,7 +175,7 @@ class AutoColecionador:
                     pendentes.append({"personagem": resultado, "view": view, "indice": indice})
 
         self._pendentes_por_guild[str(guild.id)] = pendentes
-        print(f" [ERIS] Auto-colecionador ({self.client.user}) rolou {len(resultados)} personagens em \"{guild.name}\" ({len(lotes)} mensagens, {len(pendentes)} livres) - decide em 5min.")
+        log.info(f" [ERIS] Auto-colecionador ({self.client.user}) rolou {len(resultados)} personagens em \"{guild.name}\" ({len(lotes)} mensagens, {len(pendentes)} livres) - decide em 5min.")
 
     async def _decidir_claims(self):
         pendentes_todos, self._pendentes_por_guild = self._pendentes_por_guild, {}
@@ -184,7 +185,7 @@ class AutoColecionador:
             try:
                 await self._reivindicar_melhor(guild_id, pendentes)
             except Exception as e:
-                print(f" [ERIS] Auto-colecionador ({self.client.user}) falhou ao reivindicar em {guild_id}: {e}")
+                log.warning(f" [ERIS] Auto-colecionador ({self.client.user}) falhou ao reivindicar em {guild_id}: {e}")
 
     async def _reivindicar_melhor(self, guild_id, pendentes):
         """🔥 Até `claims_por_ciclo` reivindicações por ciclo (2026-09-04,
@@ -212,7 +213,7 @@ class AutoColecionador:
             await item["view"].marcar_reivindicada_externamente(item["indice"], rotulo)
             if not ok:
                 continue  # corrida de última hora - um humano clicou entre o filtro e agora
-            print(f" [ERIS] Auto-colecionador ({self.client.user}) reivindicou {personagem['nome']} (popularidade {personagem.get('popularidade', 0)}) em {guild_id}.")
+            log.info(f" [ERIS] Auto-colecionador ({self.client.user}) reivindicou {personagem['nome']} (popularidade {personagem.get('popularidade', 0)}) em {guild_id}.")
             if item["view"].mensagem is not None:
                 try:
                     await item["view"].mensagem.channel.send(embed=embed)
@@ -271,7 +272,7 @@ class AutoColecionadorUsuarios:
             try:
                 await self._rodar_tiros_guild(guild)
             except Exception as e:
-                print(f" [ERIS] Auto-coleta (usuários) falhou ao rolar em {guild.id}: {e}")
+                log.warning(f" [ERIS] Auto-coleta (usuários) falhou ao rolar em {guild.id}: {e}")
 
     async def _rodar_tiros_guild(self, guild):
         ids_ativos = await asyncio.to_thread(db.usuarios_auto_colecionar_ativos, guild.id)
@@ -280,13 +281,13 @@ class AutoColecionadorUsuarios:
         config = await asyncio.to_thread(db.obter_configuracao_colecao, guild.id)
         canal = _canal_dos_rolls(guild, config)
         if canal is None:
-            print(f" [ERIS] Auto-coleta (usuários) sem canal configurado em \"{guild.name}\" (configure com /colecao_admin canal).")
+            log.warning(f" [ERIS] Auto-coleta (usuários) sem canal configurado em \"{guild.name}\" (configure com /colecao_admin canal).")
             return
         for user_id in ids_ativos:
             try:
                 await self._rodar_tiros_usuario(guild, canal, config, user_id)
             except Exception as e:
-                print(f" [ERIS] Auto-coleta (usuários) falhou pra {user_id} em {guild.id}: {e}")
+                log.warning(f" [ERIS] Auto-coleta (usuários) falhou pra {user_id} em {guild.id}: {e}")
 
     async def _rodar_tiros_usuario(self, guild, canal, config, user_id):
         # 🔥 "isso so sera feito se n tiver usado os rolls ainda" - reaproveita
@@ -309,7 +310,7 @@ class AutoColecionadorUsuarios:
         self._pendentes[(str(guild.id), str(user_id))] = pendentes
         membro = guild.get_member(int(user_id))
         nome_exibicao = membro.display_name if membro else f"<@{user_id}>"
-        print(f" [ERIS] Auto-coleta ({nome_exibicao}) rolou {len(resultados)} personagens em \"{guild.name}\" ({len(lotes)} mensagens, {len(pendentes)} livres) - decide em 5min.")
+        log.info(f" [ERIS] Auto-coleta ({nome_exibicao}) rolou {len(resultados)} personagens em \"{guild.name}\" ({len(lotes)} mensagens, {len(pendentes)} livres) - decide em 5min.")
 
     async def _decidir_claims(self):
         pendentes_todos, self._pendentes = self._pendentes, {}
@@ -319,7 +320,7 @@ class AutoColecionadorUsuarios:
             try:
                 await self._reivindicar_melhor(guild_id, user_id, pendentes)
             except Exception as e:
-                print(f" [ERIS] Auto-coleta (usuários) falhou ao reivindicar pra {user_id} em {guild_id}: {e}")
+                log.warning(f" [ERIS] Auto-coleta (usuários) falhou ao reivindicar pra {user_id} em {guild_id}: {e}")
 
     async def _reivindicar_melhor(self, guild_id, user_id, pendentes):
         """🔥 Até o TOTAL de claims que a pessoa tem disponível nesse ciclo
@@ -359,9 +360,9 @@ class AutoColecionadorUsuarios:
             rotulo = f"Reivindicada por {membro.display_name}" if ok else "Já reivindicada"
             await item["view"].marcar_reivindicada_externamente(item["indice"], rotulo)
             if not ok:
-                print(f" [ERIS] Auto-coleta ({membro.display_name}) não conseguiu reivindicar {personagem['nome']} em {guild_id}.")
+                log.warning(f" [ERIS] Auto-coleta ({membro.display_name}) não conseguiu reivindicar {personagem['nome']} em {guild_id}.")
                 continue
-            print(f" [ERIS] Auto-coleta ({membro.display_name}) reivindicou {personagem['nome']} (popularidade {personagem.get('popularidade', 0)}) em {guild_id}.")
+            log.info(f" [ERIS] Auto-coleta ({membro.display_name}) reivindicou {personagem['nome']} (popularidade {personagem.get('popularidade', 0)}) em {guild_id}.")
             if item["view"].mensagem is not None:
                 try:
                     await item["view"].mensagem.channel.send(embed=embed)

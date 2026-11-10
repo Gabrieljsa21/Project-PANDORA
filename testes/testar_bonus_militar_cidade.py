@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pandora import cidade, personagens_favoritas, torre
+from pandora import cidade, db, personagens_favoritas, torre
 
 
 def testar_militar_usa_cinco_por_cento_do_nivel():
@@ -45,7 +45,10 @@ def testar_tabela_de_slots_favoritos():
     assert sum(precos.values()) == 1_050_000_000
 
 
-def testar_fortalecimento_do_slot_nao_pula_degraus_por_base_alta():
+def testar_fortalecimento_do_slot_nao_pula_degraus_por_base_alta(monkeypatch):
+    # Popularidade máxima do catálogo fixada (era lida do banco real, então
+    # o teste só passava na máquina com `data/pandora.db` de produção).
+    monkeypatch.setattr(db.combate, "_popularidade_maxima_cache", 11_266)
     # Mesmo uma personagem de Base natural 1.000 começa no primeiro patamar
     # do slot. Os degraus iniciais não mudam seu CP, mas são obrigatórios.
     power, proximo = personagens_favoritas._estado_fortalecimento(11_266, 0)
@@ -68,15 +71,3 @@ def testar_curva_da_torre_valida_150k_no_andar_400():
     assert torre.power_alvo_andar(200) == 56_930
     assert torre.power_alvo_andar(300) == 100_000
     assert torre.power_alvo_andar(400) == 150_000
-
-
-if __name__ == "__main__":
-    testar_militar_usa_cinco_por_cento_do_nivel()
-    testar_arcano_usa_cinco_por_cento_do_nivel()
-    testar_outras_areas_mantem_multiplicador_integral()
-    testar_ordem_visual_da_cidade()
-    testar_bonus_loot_da_colecao_e_linear()
-    testar_tabela_de_slots_favoritos()
-    testar_fortalecimento_do_slot_nao_pula_degraus_por_base_alta()
-    testar_curva_da_torre_valida_150k_no_andar_400()
-    print("PASS: fórmulas da Cidade, loot e tabela de slots")

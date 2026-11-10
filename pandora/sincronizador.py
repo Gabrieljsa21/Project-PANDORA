@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from discord.ext import tasks
 
 from pandora import db, importar_get_waifu
+from pandora.registro import log
 
 INTERVALO_SINCRONIZACAO = timedelta(days=7)
 INTERVALO_CHECAGEM_SEGUNDOS = 3600
@@ -51,13 +52,13 @@ class SincronizadorCatalogo:
     async def _sincronizar(self):
         agora = datetime.now(timezone.utc).isoformat()
         await asyncio.to_thread(db.registrar_tentativa_sincronizacao_catalogo, agora)
-        print(" [ERIS] Sincronização semanal do catálogo - baixando get_waifu...")
+        log.info(" [ERIS] Sincronização semanal do catálogo - baixando get_waifu...")
         try:
             resumo = await asyncio.to_thread(importar_get_waifu.sincronizar)
         except Exception as e:
             erro = f"falhou: {e}"
-            print(f" [ERIS] Sincronização do catálogo {erro}")
+            log.warning(f" [ERIS] Sincronização do catálogo {erro}")
             await asyncio.to_thread(db.registrar_resultado_sincronizacao_catalogo, agora, False, erro)
             return
-        print(f" [ERIS] Sincronização do catálogo OK - {resumo}")
+        log.info(f" [ERIS] Sincronização do catálogo OK - {resumo}")
         await asyncio.to_thread(db.registrar_resultado_sincronizacao_catalogo, agora, True, resumo)

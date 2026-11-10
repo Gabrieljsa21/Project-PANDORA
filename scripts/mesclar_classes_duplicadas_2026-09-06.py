@@ -24,7 +24,6 @@ classificando em inglês por engano não é um padrão de string previsível)
 Faz backup do banco ANTES (mesmo padrão dos scripts de reclassificação
 anteriores)."""
 import shutil
-from datetime import datetime
 
 from pandora import db
 

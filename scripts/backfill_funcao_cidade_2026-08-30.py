@@ -12,10 +12,11 @@ foi decidido, mesmo padrão de `reclassificar_2026-08-30.py`.
 
 Uso: python backfill_funcao_cidade_2026-08-30.py <caminho_do_banco>
 """
+import os
 import sqlite3
 import sys
 
-CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else r"C:\Workspace\Project-PANDORA\data\pandora.db"
+CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 FUNCAO_POR_CLASSE = {
     # Militar - toda classe de combate direto (categoria_combate DPS/Tank

@@ -1,5 +1,18 @@
 # TODO - Project PANDORA
 
+### Validar ao vivo a leva de base da v0.3.0 (2026-11-10)
+
+**Prioridade:** Alta | **Complexidade:** Baixa
+
+Débito atômico, WAL, pacotes `db/`/`paineis/`, View base e `/merge` foram
+validados por teste automatizado (35 testes), por comparação do corpo de
+cada função com o de antes da divisão e registrando os comandos de barra
+do ERIS numa árvore de teste, sem clique real no Discord. Falta
+confirmar ao vivo depois de reiniciar o ERIS: `/pandora` abre e cada botão
+do hub responde; `/merge` abre o painel de Fusão; reagir com ⭐ num roll
+reivindica e mostra "⭐ Favoritada!"; uma compra qualquer (Upar Nível, Loja)
+debita certo; o log do ERIS continua recebendo as linhas `[ERIS]`/`[PANDORA]`.
+
 ### Decidir o que fazer com `andar_atual_torre` inflado (2026-09-06)
 
 **Prioridade:** Alta | **Complexidade:** Baixa (decisão) / Média (se migrar)
@@ -144,26 +157,6 @@ no Investir em Massa - precisa calcular o desconto 1x FORA do loop, nunca
 por personagem, mesmo cuidado já tomado em `gacha.rolar_varios`/
 `db.pontos_bonus_raridade_por_nivel` nesta mesma leva, senão reabre a
 classe de bug "GAIA não respondeu a tempo" por N+1 de consulta).
-
-### `/merge` (comando de barra) provavelmente quebra ao ser usado (achado 2026-09-06)
-
-**Prioridade:** Alta | **Complexidade:** Baixa
-
-Achado auditando o código pra escrever `FUNCIONALIDADES.md`: o comando
-`/merge` em `C:\Workspace\Project-ERIS\eris\bot.py` (linha ~1094) chama
-`economia.executar_merge(guild_id, user_id, ids, confirmar)` (4 argumentos)
-e tenta desempacotar 3 valores de retorno, mas a função real em
-`pandora/economia.py` tem assinatura `executar_merge(guild_id, user_id,
-ids, escolha_id)` e devolve só 2 valores - assinatura mudou em 2026-09-02
-(Merge virou escolha do jogador em vez de sorteio aleatório) e o comando de
-barra nunca foi atualizado junto. Precisa: (1) confirmar ao vivo que `/merge`
-de fato quebra com `TypeError`; (2) decidir se o comando é corrigido pra
-bater com a assinatura nova (a UI real da Fusão hoje é um fluxo de 2 etapas
-- escolher as 5 pra sacrificar, depois escolher o alvo entre até 25 livres
-- que não cabe bem num único comando de slash sem parâmetros; talvez o
-comando deva só abrir o mesmo painel do botão "🧬 Fusão" em vez de tentar
-replicar o fluxo por parâmetro) ou removido, já que o botão "🧬 Fusão" do
-hub `/pandora` já cobre o fluxo funcionando de verdade.
 
 ### Validar navegador de Waifus + dropdown de Fortalecimento ao vivo (2026-09-06)
 

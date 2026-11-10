@@ -2482,6 +2482,59 @@ problema real.
 
 - `idx_colecao_propriedade_personagem` em `colecao_propriedade (personagem_id)`. A PK começa por `guild_id`, então consultas que procuram dono de uma personagem em qualquer servidor faziam varredura completa. A contagem da fila do catálogo não adquirido (`contar_personagens_nao_adquiridos_sem_classe`) levava 16s e estourava os 3s que o Discord dá para abrir o formulário de validação.
 
+## Débito atômico, WAL, pacotes `db/` e `paineis/`, testes (2026-11-10)
+
+Leva de melhorias de base (v0.3.0), sem mudança de regra de jogo.
+
+**Dinheiro.** Todo gasto passa por `db.debitar_wishards`/`db.debitar_soulstone`
+(`_movimentar_saldo` em `pandora/db/colecao.py`): `BEGIN IMMEDIATE` trava a
+escrita antes de ler o saldo, e o gasto que deixaria saldo negativo devolve
+`None` sem gravar nada. O padrão antigo, `if saldo_wishards(...) < custo` e
+depois `creditar_wishards(..., -custo)`, não deve voltar: são duas conexões,
+e dois cliques em threads diferentes passavam os dois pela conferência.
+`creditar_*` continua existindo pra crédito e estorno.
+
+**Conferir e alterar na mesma função.** O débito atômico sozinho não impede
+que dois cliques leiam o mesmo nível e paguem duas vezes pelo mesmo degrau.
+Pra isso existe `@db.serializar_por_jogador` (trava reentrante por
+`(guild_id, user_id)`, em memória): toda função `f(guild_id, user_id, ...)`
+que confere um estado e depois o altera leva o decorador. Vale só dentro de
+um processo, o que basta enquanto o PANDORA for biblioteca de um bot só.
+
+**Troca.** `economia._executar_troca` cobra os dois lados primeiro, estorna
+se um deles falhar, e só então move personagens. Devolve `False` quando nada
+foi trocado; quem chama cancela a proposta.
+
+**Banco.** `inicializar()` liga WAL (`_ligar_wal`) e `conexao()` abre com
+`timeout=15`. Backup com o bot ligado: `db.copia_de_seguranca(destino)`
+(API de backup do SQLite). Migração nova que precisa rodar uma vez: entrada
+em `_MIGRACOES` (`pandora/db/nucleo.py`), registrada em
+`colecao_schema_version`. Tabela nova continua entrando em `_SCHEMA` com
+`CREATE TABLE IF NOT EXISTS`.
+
+**Pacotes.** `pandora/db/` e `pandora/paineis/` substituem os dois arquivos
+gigantes. Os `__init__` reexportam tudo, então nada muda pra quem usa
+`db.<nome>`/`paineis.<nome>`. Dentro de cada pacote a dependência é em uma
+direção só, na ordem escrita no docstring do `__init__`; um módulo novo
+importa dos anteriores com `from pandora.db.<modulo> import nome`. Estado
+mutável de módulo não é reexportado por referência viva: nos testes, trocar
+`pandora.db.nucleo.CAMINHO_BANCO` (não `db.CAMINHO_BANCO`).
+`catálogo + afinidade/saldo + progressão` ficaram juntos em `db/colecao.py`
+porque se chamam em ciclo.
+
+**Views.** Toda View herda de `ui_base.ViewPandora` e todo Modal de
+`ui_base.ModalPandora`. O `on_error` avisa o jogador (efêmero) e grava o
+traceback no log. Há um teste que falha se aparecer uma View fora da base.
+
+**Log.** `from pandora.registro import log` no lugar de `print`. O handler
+padrão escreve no `sys.stdout` do momento da mensagem, porque o ERIS troca
+`sys.stdout` pelo redirecionador de arquivo depois de importar o pacote.
+
+**Testes.** `testes/` roda com pytest; a fixture `banco` (em `conftest.py`)
+entrega um SQLite novo por teste. `testar_contrato_usado_pelo_bot` fixa as
+assinaturas e os nomes que o ERIS importa: mudar uma assinatura pública sem
+mudar o ERIS foi o que deixou o `/merge` quebrado por dois meses.
+
 ## Pendências
 
 - UI (`paineis.py`/`consulta.py`/`economia.py`) continua misturada com

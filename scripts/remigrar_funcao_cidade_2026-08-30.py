@@ -15,10 +15,11 @@ desta remigração).
 
 Uso: python remigrar_funcao_cidade_2026-08-30.py <caminho_do_banco>
 """
+import os
 import sqlite3
 import sys
 
-CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else r"C:\Workspace\Project-PANDORA\data\pandora.db"
+CAMINHO_BANCO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pandora.db")
 
 FUNCAO_POR_CLASSE_V2 = {
     # Militar - sem mudança de conteúdo, só o nome da função (era "Militar" já)

@@ -218,6 +218,7 @@ def custo_fortalecer_ate(indice_proximo, indice_alvo):
     return sum(CUSTOS_FORTALECIMENTO[indice_proximo:indice_alvo + 1])
 
 
+@db.serializar_por_jogador
 def fortalecer_ate(guild_id, user_id, slot, indice_alvo):
     """Compra os patamares de Fortalecimento do ocupante atual desse slot,
     do PRÓXIMO disponível até `indice_alvo` (inclusive), em sequência -
@@ -253,13 +254,15 @@ def fortalecer_ate(guild_id, user_id, slot, indice_alvo):
     if db.saldo_soulstone(guild_id, user_id) < custo_total:
         return False, f"Custa {db.fmt_numero(custo_total)} Soulstone no total e você não tem o suficiente."
     for indice in range(indice_proximo, indice_alvo + 1):
-        db.creditar_soulstone(guild_id, user_id, -CUSTOS_FORTALECIMENTO[indice], "fortalecimento_personagem_favorita", f"slot {slot} patamar {indice}")
+        if db.debitar_soulstone(guild_id, user_id, CUSTOS_FORTALECIMENTO[indice], "fortalecimento_personagem_favorita", f"slot {slot} patamar {indice}") is None:
+            return False, "O saldo de Soulstone mudou no meio da compra - confira o slot e tente de novo."
         db.marcar_patamar_fortalecimento(guild_id, user_id, slot, indice)
     patamares_comprados = indice_alvo - indice_proximo + 1
     _lo, hi = PATAMARES_FORTALECIMENTO[indice_alvo]
     return True, f"💪 Fortalecido {patamares_comprados} patamar(es)! Chegou em {hi} no slot {slot} (custou {db.fmt_numero(custo_total)} Soulstone)."
 
 
+@db.serializar_por_jogador
 def ascender_ate(guild_id, user_id, slot, nivel_alvo):
     """Compra Ascensões em sequência até ``nivel_alvo``.
 
@@ -284,13 +287,12 @@ def ascender_ate(guild_id, user_id, slot, nivel_alvo):
     if nivel_alvo <= nivel_atual:
         return False, "Ascensão-alvo inválida - tenta abrir o dropdown de novo."
     custo_total = custo_ascender_ate(nivel_atual, nivel_alvo)
-    if db.saldo_soulstone(guild_id, user_id) < custo_total:
+    if db.debitar_soulstone(
+        guild_id, user_id, custo_total, "ascensao_personagem_favorita",
+        f"slot {slot} ascensão {nivel_atual}->{nivel_alvo}",
+    ) is None:
         return False, f"Custa {db.fmt_numero(custo_total)} Soulstone no total e você não tem o suficiente."
     quantidade = nivel_alvo - nivel_atual
-    db.creditar_soulstone(
-        guild_id, user_id, -custo_total, "ascensao_personagem_favorita",
-        f"slot {slot} ascensão {nivel_atual}->{nivel_alvo}",
-    )
     db.incrementar_ascensao_personagem_favorita(guild_id, user_id, slot, quantidade)
     novo_power = 1000 + nivel_alvo * BONUS_POWER_POR_ASCENSAO
     return True, f"✨ Ascendido {quantidade} nível(is)! Power Base do slot {slot} agora é {db.fmt_numero(novo_power)} (custou {db.fmt_numero(custo_total)} Soulstone)."

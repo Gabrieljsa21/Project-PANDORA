@@ -16,7 +16,6 @@ Uso (rodar da RAIZ do repo, DEPOIS de importar o catálogo bruto):
     python -m scripts.aplicar_classificacao_personagens"""
 import json
 import os
-import shutil
 import sys
 from datetime import datetime
 
@@ -35,7 +34,7 @@ def main():
     if os.path.exists(db.CAMINHO_BANCO):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup = db.CAMINHO_BANCO.replace("pandora.db", f"pandora_backup_pre_aplicar_classificacao_{timestamp}.db")
-        shutil.copy(db.CAMINHO_BANCO, backup)
+        db.copia_de_seguranca(backup)
         print(f"Backup salvo em {backup}.")
 
     db.inicializar()

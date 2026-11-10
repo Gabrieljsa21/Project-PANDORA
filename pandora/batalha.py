@@ -416,4 +416,3 @@ def papel_do_jogador(desafio, user_id):
     if user_id == str(desafio["defensor_id"]):
         return "defensor"
     return None
-    return True, vencedor

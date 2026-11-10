@@ -12,6 +12,7 @@ confiando no que a proposta dizia na hora de criar."""
 import discord
 
 from pandora import db
+from pandora.ui_base import ViewPandora
 
 _ESTRELAS = {1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "⭐⭐⭐⭐", 5: "⭐⭐⭐⭐⭐"}
 
@@ -86,16 +87,29 @@ def validar_proposta(guild_id, proponente_id, oferece_personagens, oferece_wisha
 
 
 def _executar_troca(guild_id, proposta):
+    """Cobra os WiShards dos dois lados ANTES de mexer em personagem.
+    Devolve False, com tudo estornado e nada trocado, se um dos lados
+    gastou o saldo entre `validar_proposta` e este ponto."""
+    referencia = str(proposta["id"])
+    pagamentos = [
+        (proposta["proponente_id"], proposta["alvo_id"], proposta["oferece_wishards"]),
+        (proposta["alvo_id"], proposta["proponente_id"], proposta["pede_wishards"]),
+    ]
+    pagamentos = [p for p in pagamentos if p[2]]
+    cobrados = []
+    for pagador, _recebedor, valor in pagamentos:
+        if db.debitar_wishards(guild_id, pagador, valor, "troca", referencia=referencia) is None:
+            for pagador_estorno, valor_estorno in cobrados:
+                db.creditar_wishards(guild_id, pagador_estorno, valor_estorno, "troca_estorno", referencia=referencia)
+            return False
+        cobrados.append((pagador, valor))
+    for _pagador, recebedor, valor in pagamentos:
+        db.creditar_wishards(guild_id, recebedor, valor, "troca", referencia=referencia)
     for pid in proposta["oferece_personagens"]:
         db.transferir_personagem(guild_id, pid, proposta["alvo_id"])
     for pid in proposta["pede_personagens"]:
         db.transferir_personagem(guild_id, pid, proposta["proponente_id"])
-    if proposta["oferece_wishards"]:
-        db.creditar_wishards(guild_id, proposta["proponente_id"], -proposta["oferece_wishards"], "troca", referencia=str(proposta["id"]))
-        db.creditar_wishards(guild_id, proposta["alvo_id"], proposta["oferece_wishards"], "troca", referencia=str(proposta["id"]))
-    if proposta["pede_wishards"]:
-        db.creditar_wishards(guild_id, proposta["alvo_id"], -proposta["pede_wishards"], "troca", referencia=str(proposta["id"]))
-        db.creditar_wishards(guild_id, proposta["proponente_id"], proposta["pede_wishards"], "troca", referencia=str(proposta["id"]))
+    return True
 
 
 def formatar_proposta(proposta):
@@ -115,7 +129,7 @@ def formatar_proposta(proposta):
     )
 
 
-class ViewTroca(discord.ui.View):
+class ViewTroca(ViewPandora):
     """Aceitar/Recusar restrito ao ALVO da proposta - revalida tudo de novo
     no aceite (`validar_proposta`, nada fica reservado entre a proposta e o
     aceite)."""
@@ -149,7 +163,10 @@ class ViewTroca(discord.ui.View):
             db.atualizar_status_proposta(self.proposta_id, "cancelada")
             await interaction.response.edit_message(content=f"Troca cancelada - {erro}", view=self)
             return
-        _executar_troca(proposta["guild_id"], proposta)
+        if not _executar_troca(proposta["guild_id"], proposta):
+            db.atualizar_status_proposta(self.proposta_id, "cancelada")
+            await interaction.response.edit_message(content="Troca cancelada - um dos lados ficou sem WiShards suficientes.", view=self)
+            return
         db.atualizar_status_proposta(self.proposta_id, "aceita")
         await interaction.response.edit_message(content="✅ Troca concluída!", view=self)
 
@@ -281,8 +298,9 @@ def criar_e_avaliar_troca(guild_id, proponente_id, alvo, oferece_ids, oferece_wi
     # `avaliar_proposta_npc`.
     if alvo.bot:
         aceita, motivo = avaliar_proposta_npc(proposta)
+        if aceita and not _executar_troca(guild_id, proposta):
+            aceita, motivo = False, "os WiShards da oferta não estão mais disponíveis"
         if aceita:
-            _executar_troca(guild_id, proposta)
             db.atualizar_status_proposta(proposta_id, "aceita")
             return "npc_aceita", f"{formatar_proposta(proposta)}\n🤖 {alvo.display_name} topou na hora - {motivo}", None
         db.atualizar_status_proposta(proposta_id, "recusada")

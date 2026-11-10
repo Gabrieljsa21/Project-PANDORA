@@ -1,11 +1,17 @@
 [project]
 name = "pandora"
-version = "0.2.0"
+version = "0.3.0"
 description = "Colecionador de Personagens (gacha estilo Mudae) extraído do Project-ERIS - biblioteca Python, sem processo/HTTP próprio, importada direto por quem tem a conexão Discord (import local por path, não satélite)."
 requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.7",
     "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
 ]
 
 [build-system]
@@ -14,3 +20,22 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["pandora*"]
+
+[tool.pytest.ini_options]
+testpaths = ["testes"]
+python_files = ["testar_*.py"]
+python_functions = ["testar_*"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+# So erro de verdade (sintaxe, nome indefinido, import/variavel sem uso).
+# Estilo e comprimento de linha ficam de fora de proposito.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Reexportação proposital: `from pandora import db; db.<nome>`.
+"pandora/db/__init__.py" = ["F401"]
+"pandora/paineis/__init__.py" = ["F401"]
