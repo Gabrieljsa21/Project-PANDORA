@@ -87,7 +87,10 @@ As tabelas antigas continuam existindo em `eris.db` (não apagadas de
 propósito - rede de segurança; `eris/db.py` só parou de CRIAR/migrar o
 schema delas, o arquivo físico ainda as tem) - útil enquanto a extração é
 recente, pode ser limpo depois que o PANDORA rodar em produção por um
-tempo sem incidente.
+tempo sem incidente. **Limpo em 2026-11-12** (v0.3.1): as 14 tabelas saíram
+do `eris.db`, com cópia em
+`Project-ERIS/data/eris_backup_pre_limpar_colecao_2026-11-12.db`. Rodar
+`scripts/migrar_de_eris.py` de novo não acha mais nada pra copiar.
 
 ## Tabela de classes - fonte única da categoria de combate (2026-08-30)
 

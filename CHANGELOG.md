@@ -7,6 +7,12 @@ Histórico de alto nível do que muda no PANDORA, por versão. Ver
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-12
+
+### Removido (2026-11-12, tabelas antigas no banco do ERIS)
+
+- **Tabelas `colecao_*` apagadas do `Project-ERIS/data/eris.db`**: eram a cópia de antes da extração (2026-08-29), sem leitura nem escrita desde então; o PANDORA usa só o `data/pandora.db`. Pedido do usuário: **"pode remover"**. As 14 tabelas saíram e o banco do ERIS caiu de 30 MB para 0,05 MB; cópia de segurança em `Project-ERIS/data/eris_backup_pre_limpar_colecao_2026-11-12.db`. O item correspondente saiu do `docs/TODO.md`.
+
 ## [0.3.0] - 2026-11-10
 
 Leva de melhorias pedida depois de uma análise do projeto: **"analisa o Project-PANDORA e ve se tem alguma sugestao de melhoria"**, seguido de **"Implemente tudo"**.

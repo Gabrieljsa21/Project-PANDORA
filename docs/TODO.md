@@ -560,15 +560,6 @@ igual ao das contas de bot, gastando a cota real da pessoa. Confirmar
 também que NADA acontece se a pessoa já tiver rolado manualmente antes de
 :50 (pedido explícito de não dar roll "de graça").
 
-### Limpar tabelas `colecao_*` órfãs em `Project-ERIS/data/eris.db`
-
-**Prioridade:** Baixa | **Complexidade:** Baixa
-
-Ver "Migração de dado" em `ARQUITETURA.md` - as tabelas antigas continuam
-fisicamente no banco do ERIS (nunca mais lidas/escritas) como rede de
-segurança temporária. Apagar depois que este repo rodar em produção por um
-tempo sem incidente.
-
 ## Roadmap futuro
 
 - **Geração de andares da Torre via IA** - Difficulty Engine determinístico
